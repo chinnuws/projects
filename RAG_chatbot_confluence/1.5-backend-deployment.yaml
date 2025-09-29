@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: confluence-chat
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: <YOUR_REGISTRY>/confluence-backend:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - secretRef:
+            name: creds
+        - configMapRef:
+            name: app-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: confluence-chat
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
