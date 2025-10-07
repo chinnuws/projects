@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+openai
+azure-search-documents
+requests
+markdown
