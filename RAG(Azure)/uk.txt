@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # United Kingdom Knowledge Base
 
 ## Climate
@@ -24,3 +25,31 @@ The UK is located on the northwestern coast of mainland Europe. It includes the 
 - Lowlands (England)
 - Valleys (Wales)
 - Coastlines and cliffs
+=======
+# United Kingdom Knowledge Base
+
+## Climate
+The United Kingdom has a temperate maritime climate with mild summers and cool, wet winters.
+
+## Countries
+The UK consists of four countries:
+- England
+- Scotland
+- Wales
+- Northern Ireland
+
+## Geography
+The UK is located on the northwestern coast of mainland Europe. It includes the island of Great Britain, the northeastern part of the island of Ireland, and many smaller islands.
+
+### Major Cities
+- London (Capital)
+- Edinburgh
+- Cardiff
+- Belfast
+
+### Landforms
+- Highlands (Scotland)
+- Lowlands (England)
+- Valleys (Wales)
+- Coastlines and cliffs
+>>>>>>> 3aa98ce57bff2d65f8e51de7441c06567fba3119
