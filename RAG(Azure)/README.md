@@ -5,10 +5,10 @@ pip install streamlit requests
 python -m venv oaisearchpoc
 source oaisearchpoc/Scripts/activate
 
-2. Install backend dependencies from requirements.txt
+3. Install backend dependencies from requirements.txt
 pip install -r backend/requirements.txt
 
-3. Run the backend FastAPI app (app.py)
+4. Run the backend FastAPI app (app.py)
 From the backend/ directory (or wherever your app.py is located):
 uvicorn app:app --reload
 This starts the backend API server at http://localhost:8000.
@@ -115,3 +115,4 @@ streamlit run app_frontend.py
 
 python -m pip install --upgrade --force-reinstall --no-cache-dir azure-search-documents==11.6.0b11
 python -m pip show azure-search-documents
+
