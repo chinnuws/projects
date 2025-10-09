@@ -1,0 +1,15 @@
+# Backend
+fastapi
+uvicorn
+azure-ai-resources
+azure-search-documents
+azure-core
+azure-identity
+requests
+beautifulsoup4
+pydantic
+python-dotenv
+
+# Frontend
+streamlit
+httpx
