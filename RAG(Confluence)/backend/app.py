@@ -5,6 +5,22 @@ from azure.core.credentials import AzureKeyCredential
 from azure.ai.projects import AIProjectClient
 import os
 
+# MCP Server
+CONFLUENCE_BASE_URL=https://your-confluence.yourcompany.com
+CONFLUENCE_SPACE_KEY=DOCS
+CONFLUENCE_USERNAME=bot-user
+CONFLUENCE_PASSWORD=your-pwd
+
+# Azure AI Search
+SEARCH_SERVICE=your-ai-search
+SEARCH_INDEX=confluence-embeddings
+SEARCH_KEY=your-search-key
+
+# Azure AI Foundry
+FOUNDRY_ENDPOINT=https://your-foundry.ai.azure.com
+FOUNDRY_KEY=your-foundry-key
+AGENT_ID=your-agent-id
+
 app = FastAPI()
 
 # Azure AI Search
