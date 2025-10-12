@@ -1,0 +1,9 @@
+azure-search-documents>=11.4.0
+azure-core
+openai>=1.0.0
+python-dotenv
+requests
+fastapi
+uvicorn
+streamlit
+pydantic
