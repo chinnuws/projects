@@ -51,12 +51,12 @@ compare page versions with local state
 fetch & reindex changed pages only, and delete pages removed from the space.
 
 7) Troubleshooting & tips
--------------------------
 If you change embedding model/deployment with a different vector dimension:
 You must recreate the search index (delete & allow the ingest script to re-create).
 Keep secrets in a secure store for production (Azure Key Vault, Managed Identity).
 For production, use a small DB (Cosmos/Postgres) instead of the local state JSON file.
 Add retries/backoffs for network/API errors in production.
+
 
 
 
