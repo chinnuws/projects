@@ -1,6 +1,6 @@
 Instructions:
 
-1) Create virtualenv and install requirements
+1) Create virtualenv and install requirements:
 python -m venv confluencepoc
 source confluencepoc/Scripts/activate
 
@@ -62,6 +62,7 @@ You must recreate the search index (delete & allow the ingest script to re-creat
 Keep secrets in a secure store for production (Azure Key Vault, Managed Identity).
 For production, use a small DB (Cosmos/Postgres) instead of the local state JSON file.
 Add retries/backoffs for network/API errors in production.
+
 
 
 
