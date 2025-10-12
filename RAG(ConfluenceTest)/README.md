@@ -1,4 +1,4 @@
-# Quick run instructions (no Docker) — local dev
+Instructions:
 
 1) Create virtualenv and install requirements
 ---------------------------------------------
@@ -63,5 +63,6 @@ You must recreate the search index (delete & allow the ingest script to re-creat
 Keep secrets in a secure store for production (Azure Key Vault, Managed Identity).
 For production, use a small DB (Cosmos/Postgres) instead of the local state JSON file.
 Add retries/backoffs for network/API errors in production.
+
 
 
