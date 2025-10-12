@@ -22,12 +22,12 @@ Ensure AZURE_SEARCH_INDEX is set or leave default 'confluence-vector-index'
 
 3) Run the ingest once (this creates index if missing and ingests)
 -----------------------------------------------------------------
-# From project root:
+From project root:
 python ingest_and_index.py
 
-# Notes:
-# - This will create/overwrite local STATE_FILE (default ./confluence_ingest_state.json).
-# - If you change embedding deployment/model later, you may need to recreate the index.
+Notes:
+This will create/overwrite local STATE_FILE (default ./confluence_ingest_state.json).
+If you change embedding deployment/model later, you may need to recreate the index.
 
 4) Run the FastAPI RAG API
 --------------------------
@@ -63,4 +63,5 @@ You must recreate the search index (delete & allow the ingest script to re-creat
 Keep secrets in a secure store for production (Azure Key Vault, Managed Identity).
 For production, use a small DB (Cosmos/Postgres) instead of the local state JSON file.
 Add retries/backoffs for network/API errors in production.
+
 
