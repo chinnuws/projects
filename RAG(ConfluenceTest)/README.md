@@ -13,11 +13,10 @@ pip install -r requirements.txt
 
 2) Create .env file
 -------------------
-cp .env.example .env
 # Edit .env and fill in:
-# - Confluence: CONFLUENCE_BASE, CONFLUENCE_USER, CONFLUENCE_API_TOKEN, CONFLUENCE_SPACE_KEY
-# - Azure Search: AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_KEY
-# - Azure OpenAI: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, EMBED_DEPLOYMENT, CHAT_DEPLOYMENT
+# Confluence: CONFLUENCE_BASE, CONFLUENCE_USER, CONFLUENCE_API_TOKEN, CONFLUENCE_SPACE_KEY
+# Azure Search: AZURE_SEARCH_ENDPOINT, AZURE_SEARCH_KEY
+# Azure OpenAI: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, EMBED_DEPLOYMENT, CHAT_DEPLOYMENT
 # Ensure AZURE_SEARCH_INDEX is set or leave default 'confluence-vector-index'
 
 3) Run the ingest once (this creates index if missing and ingests)
@@ -26,8 +25,8 @@ cp .env.example .env
 python ingest_and_index.py
 
 # Notes:
-# - This will create/overwrite local STATE_FILE (default ./confluence_ingest_state.json).
-# - If you change embedding deployment/model later, you may need to recreate the index.
+# This will create/overwrite local STATE_FILE (default ./confluence_ingest_state.json).
+# If you change embedding deployment/model later, you may need to recreate the index.
 
 4) Run the FastAPI RAG API
 --------------------------
@@ -51,10 +50,10 @@ streamlit run frontend_streamlit.py
 python ingest_and_index.py
 
 # The script will:
-# - check if index exists (creates if missing)
-# - list pages in the hard-coded space
-# - compare page versions with local state
-# - fetch & reindex changed pages only, and delete pages removed from the space.
+# check if index exists (creates if missing)
+# list pages in the hard-coded space
+# compare page versions with local state
+# fetch & reindex changed pages only, and delete pages removed from the space.
 
 7) Troubleshooting & tips
 -------------------------
@@ -63,3 +62,4 @@ python ingest_and_index.py
 - Keep secrets in a secure store for production (Azure Key Vault, Managed Identity).
 - For production, use a small DB (Cosmos/Postgres) instead of the local state JSON file.
 - Add retries/backoffs for network/API errors in production.
+
