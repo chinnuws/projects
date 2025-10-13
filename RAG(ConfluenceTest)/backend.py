@@ -1,116 +1,149 @@
-"""
-FastAPI RAG endpoint (backend.py)
-- /api/query : POST {query, top_k?}
-  returns {"answer": "...", "sources":[{title,url,content,score}]}
-  
-This uses:
-- Azure OpenAI embeddings for query
-- Azure Cognitive Search vector search
-- Azure OpenAI Chat for final answer
-"""
 import os
-from fastapi import FastAPI
+from typing import List, Dict
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List
 from dotenv import load_dotenv
+from azure.search.documents import SearchClient
+from azure.core.credentials import AzureKeyCredential
+from openai import AzureOpenAI
 
 load_dotenv()
 
-from openai import AzureOpenAI
-from azure.search.documents import SearchClient
-from azure.search.documents.models import VectorizedQuery
-from azure.core.credentials import AzureKeyCredential
+app = FastAPI(title="Confluence RAG API", version="1.0")
 
-# env config
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Azure Search settings
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-vector-index")
-EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
-CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+
+# Azure OpenAI settings
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
+EMBED_DEPLOYMENT = os.getenv("EMBED_DEPLOYMENT")
+CHAT_DEPLOYMENT = os.getenv("CHAT_DEPLOYMENT")
 
-# validate
-for name, val in [
-    ("AZURE_SEARCH_ENDPOINT", AZURE_SEARCH_ENDPOINT),
-    ("AZURE_SEARCH_KEY", AZURE_SEARCH_KEY),
-    ("AZURE_OPENAI_ENDPOINT", AZURE_OPENAI_ENDPOINT),
-    ("AZURE_OPENAI_KEY", AZURE_OPENAI_KEY),
-    ("EMBED_DEPLOYMENT", EMBED_DEPLOYMENT),
-    ("CHAT_DEPLOYMENT", CHAT_DEPLOYMENT)
-]:
-    if not val:
-        raise RuntimeError(f"Missing env var {name}")
-
-# Azure OpenAI client
-client = AzureOpenAI(
-    api_key=AZURE_OPENAI_KEY,
-    api_version="2023-05-15",
-    azure_endpoint=AZURE_OPENAI_ENDPOINT
-)
-
+# Initialize clients
 search_client = SearchClient(
     endpoint=AZURE_SEARCH_ENDPOINT,
     index_name=AZURE_SEARCH_INDEX,
     credential=AzureKeyCredential(AZURE_SEARCH_KEY)
 )
 
-app = FastAPI(title="Confluence RAG API")
+openai_client = AzureOpenAI(
+    api_key=AZURE_OPENAI_KEY,
+    api_version="2024-02-01",
+    azure_endpoint=AZURE_OPENAI_ENDPOINT
+)
 
-class QueryReq(BaseModel):
+
+class QueryRequest(BaseModel):
     query: str
     top_k: int = 5
 
-@app.post("/api/query")
-def query_endpoint(req: QueryReq):
-    q = req.query
-    k = req.top_k if req.top_k and req.top_k > 0 else 5
-    
-    # 1) embed query
-    q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=q).data[0].embedding
-    
-    # 2) vector search in Azure Cognitive Search
-    vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=k, fields="vector")
-    
-    results = search_client.search(
-        search_text="",
-        vector_queries=[vector_query],
-        select=["id", "title", "content", "url", "page_id", "last_modified"],
-        filter=f"space eq '{SPACE_KEY}'" if SPACE_KEY else None
+
+class SourceDocument(BaseModel):
+    page_title: str
+    page_url: str
+    has_video: bool
+    video_count: int
+    video_filenames: List[str]
+    relevance_score: float
+    content_snippet: str
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[SourceDocument]
+
+
+def get_embedding(text: str) -> List[float]:
+    """Generate embeddings using Azure OpenAI."""
+    response = openai_client.embeddings.create(
+        input=text,
+        model=EMBED_DEPLOYMENT
     )
+    return response.data[0].embedding
+
+
+@app.post("/api/query", response_model=QueryResponse)
+async def query_confluence(request: QueryRequest):
+    """Query the Confluence knowledge base and return answer with sources."""
+    try:
+        # Generate query embedding
+        query_vector = get_embedding(request.query)
+        
+        # Search Azure AI Search
+        results = search_client.search(
+            search_text=request.query,
+            vector_queries=[{
+                "vector": query_vector,
+                "k_nearest_neighbors": request.top_k,
+                "fields": "content_vector"
+            }],
+            select=["title", "content", "page_url", "has_video", "video_count", "video_filenames"],
+            top=request.top_k
+        )
+        
+        # Collect context and source documents
+        context_parts = []
+        sources = []
+        
+        for result in results:
+            score = result.get("@search.score", 0.0)
+            content = result.get("content", "")
+            
+            # Add to context for RAG
+            context_parts.append(f"**{result['title']}**\n{content}")
+            
+            # Add to sources
+            sources.append(SourceDocument(
+                page_title=result.get("title", "Untitled"),
+                page_url=result.get("page_url", ""),
+                has_video=result.get("has_video", False),
+                video_count=result.get("video_count", 0),
+                video_filenames=result.get("video_filenames", []),
+                relevance_score=round(score, 4),
+                content_snippet=content[:200] + "..." if len(content) > 200 else content
+            ))
+        
+        if not context_parts:
+            return QueryResponse(
+                answer="I couldn't find relevant information to answer your question.",
+                sources=[]
+            )
+        
+        # Generate answer using Azure OpenAI
+        context = "\n\n".join(context_parts)
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided Confluence documentation. Always cite the source when answering."},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {request.query}\n\nAnswer:"}
+        ]
+        
+        response = openai_client.chat.completions.create(
+            model=CHAT_DEPLOYMENT,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        answer = response.choices[0].message.content
+        
+        return QueryResponse(answer=answer, sources=sources)
     
-    hits = []
-    for r in results:
-        hits.append({
-            "id": r["id"],
-            "title": r.get("title"),
-            "content": r.get("content"),
-            "url": r.get("url")
-        })
-    
-    # 3) build prompt - NO INLINE CITATIONS
-    snippets = []
-    for i, h in enumerate(hits):
-        snippet = h["content"]
-        if len(snippet) > 900:
-            snippet = snippet[:900] + "..."
-        snippets.append(f"Source {i+1}: {h.get('title')}\n{snippet}\nURL: {h.get('url')}")
-    
-    system_prompt = "You are an assistant that answers questions based only on the provided Confluence sources. If the answer is not contained in the sources, say you don't know and suggest how to proceed."
-    user_prompt = f"User question: {q}\n\nHere are the sources:\n\n" + "\n\n".join(snippets) + "\n\nAnswer concisely in a natural, conversational way without including source citations in your response."
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ]
-    
-    chat_resp = client.chat.completions.create(
-        model=CHAT_DEPLOYMENT,
-        messages=messages,
-        max_tokens=512,
-        temperature=0.0
-    )
-    
-    assistant_text = chat_resp.choices[0].message.content
-    return {"answer": assistant_text, "sources": hits}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy"}
