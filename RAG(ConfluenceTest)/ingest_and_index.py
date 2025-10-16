@@ -104,6 +104,30 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         logging.error(f"Embedding failed for batch of size {len(texts)}: {e}")
         return [[0.0] * 1536 for _ in texts]
 
+def fix_confluence_url(base_url: str, webui_path: str, space_key: str, page_id: str) -> str:
+    """
+    Ensure Confluence URL includes /wiki/ in the path.
+    Handles various Confluence URL formats.
+    """
+    base = base_url.rstrip('/')
+    
+    if webui_path:
+        # If webui path is provided (e.g., "/spaces/SPACEKEY/pages/12345/PageTitle")
+        if webui_path.startswith("/"):
+            # Check if /wiki is missing and path starts with /spaces
+            if "/wiki" not in base and webui_path.startswith("/spaces"):
+                return f"{base}/wiki{webui_path}"
+            else:
+                return f"{base}{webui_path}"
+        else:
+            return urljoin(base, webui_path)
+    else:
+        # Fallback: construct URL manually
+        if "/wiki" in base:
+            return f"{base}/spaces/{space_key}/pages/{page_id}"
+        else:
+            return f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+
 # ----- Azure Search index management -----
 def list_indexes() -> List[str]:
     idx_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=AzureKeyCredential(AZURE_SEARCH_KEY))
@@ -136,7 +160,7 @@ def ensure_index_exists():
         SimpleField(name="version", type=SearchFieldDataType.Int32, filterable=True, sortable=True),
         SimpleField(name="space", type=SearchFieldDataType.String, filterable=True, sortable=True),
         SimpleField(name="labels", type=SearchFieldDataType.Collection(SearchFieldDataType.String), filterable=True),
-        SimpleField(name="has_video", type=SearchFieldDataType.Boolean, filterable=True),  # NEW FIELD
+        SimpleField(name="has_video", type=SearchFieldDataType.Boolean, filterable=True),
         # Use SearchField for vector
         SearchField(
             name="vector",
@@ -273,17 +297,15 @@ def run_ingest():
     for pid in to_update:
         page = fetch_page(pid)
         title = page.get("title", "")
-        # try better url from _links if available
+        
+        # FIXED: Get webui link and construct proper URL with /wiki/
         links = page.get("_links", {})
-        webui = links.get("webui")
-        if webui:
-            url = urljoin(CONFLUENCE_BASE, webui)
-        else:
-            url = urljoin(CONFLUENCE_BASE, f"/spaces/{SPACE_KEY}/pages/{pid}")
+        webui = links.get("webui", "")
+        url = fix_confluence_url(CONFLUENCE_BASE, webui, SPACE_KEY, pid)
 
         storage = page.get("body", {}).get("storage", {}).get("value", "")
         text = convert_storage_to_text(storage)
-        has_video = has_video_content(storage)  # NEW: Detect video
+        has_video = has_video_content(storage)
 
         chunks = chunk_text(text)
         labels = []
@@ -304,12 +326,12 @@ def run_ingest():
                     "page_id": pid,
                     "title": title,
                     "content": ch,
-                    "url": url,
+                    "url": url,  # Fixed URL with /wiki/
                     "last_modified": last_modified,
                     "version": version_num,
                     "space": SPACE_KEY,
                     "labels": labels,
-                    "has_video": has_video,  # NEW FIELD
+                    "has_video": has_video,
                     "vector": embeddings[j]
                 }
                 all_docs.append(doc)
