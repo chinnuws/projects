@@ -1,6 +1,6 @@
 """
 FastAPI RAG endpoint (backend.py)
-Strictly grounded responses - only from knowledge base content
+Enhanced with strict knowledge base adherence
 """
 
 import os
@@ -68,18 +68,13 @@ class QueryReq(BaseModel):
     top_k: int = 5
 
 def is_outdated_page(title: str, content: str) -> bool:
-    """
-    Check if a page is marked as outdated based on title or content.
-    Returns True if the page should be filtered out.
-    """
+    """Check if a page is marked as outdated"""
     outdated_patterns = [
         r'\boutdated\s+version\b',
-        r'\boldated\s+version\b',
         r'\barchived\s+version\b',
         r'\blegacy\s+version\b',
         r'\bdeprecated\b',
         r'\bno\s+longer\s+valid\b',
-        r'\bno\s+longer\s+current\b',
         r'\bold\s+version\b',
         r'\bsuperseded\b',
         r'\bobsolete\b',
@@ -97,9 +92,7 @@ def is_outdated_page(title: str, content: str) -> bool:
     return False
 
 def rerank_results(query: str, results: List[dict]) -> List[dict]:
-    """
-    Rerank results based on relevance to the query.
-    """
+    """Rerank results based on relevance"""
     if len(results) <= 1:
         return results
     
@@ -118,23 +111,21 @@ def rerank_results(query: str, results: List[dict]) -> List[dict]:
         title_overlap = len(query_terms & title_terms) / max(len(query_terms), 1)
         
         relevance_score = (title_overlap * 2.0) + (content_overlap * 1.0)
-        
         scored_results.append((relevance_score, result))
     
     scored_results.sort(reverse=True, key=lambda x: x[0])
-    
     return [result for _, result in scored_results]
 
 @app.post("/api/query")
 def query_endpoint(req: QueryReq):
     q = req.query
-    k = min(req.top_k if req.top_k and req.top_k > 0 else 5, 10)
+    k = min(req.top_k if req.top_k and req.top_k > 0 else 5, 15)  # Increased to 15 for better coverage
 
-    # 1) Embed the query (no expansion - more precise grounding)
+    # 1) Embed the query directly (no expansion to keep it focused)
     q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=q).data[0].embedding
 
-    # 2) Vector search
-    search_k = min(k * 2, 20)
+    # 2) Vector search with higher k to account for filtering
+    search_k = min(k * 3, 45)  # Increased for better recall
     vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=search_k, fields="vector")
     results = search_client.search(
         search_text="",
@@ -143,7 +134,7 @@ def query_endpoint(req: QueryReq):
         filter=f"space eq '{SPACE_KEY}'" if SPACE_KEY else None
     )
 
-    # 3) Deduplicate and filter
+    # 3) Deduplicate, filter outdated pages
     hits = []
     seen_pages = set()
     filtered_count = 0
@@ -169,71 +160,69 @@ def query_endpoint(req: QueryReq):
             "has_video": r.get("has_video", False)
         })
 
-    # 4) Rerank
+    # 4) Rerank and take top k
     hits = rerank_results(q, hits)[:k]
 
-    # 5) Build strict grounded prompt
+    # 5) Build prompt with COMPLETE content (not truncated)
     snippets = []
     for i, h in enumerate(hits):
-        snippet = h["content"]
-        if len(snippet) > 1500:
-            snippet = snippet[:1500] + "..."
+        snippet = h["content"]  # Full content, no truncation
+        video_note = " [📹 Video available]" if h.get("has_video") else ""
         
-        video_note = " [Contains Video]" if h.get("has_video") else ""
         snippets.append(f"""
-===== SOURCE {i+1} =====
+=== SOURCE {i+1} ===
 Title: {h.get('title')}{video_note}
 Content: {snippet}
 URL: {h.get('url')}
+====================
 """)
 
-    # STRICT system prompt - no external knowledge
-    system_prompt = """You are a Confluence documentation assistant. You must ONLY provide information that is explicitly stated in the sources below.
+    # STRICT system prompt - only use provided data
+    system_prompt = """You are a Confluence knowledge base assistant. Your ONLY job is to extract and present information that is EXPLICITLY stated in the provided sources.
 
-STRICT RULES:
-1. ONLY use information directly found in the provided sources
-2. Do NOT add any external knowledge, assumptions, or generalizations
-3. Do NOT make up information or provide generic advice
-4. If the exact answer is not in the sources, clearly state: "I don't have this information in the available documentation."
-5. Quote or paraphrase directly from the sources
-6. When referencing information, be specific about which source it came from
-7. If sources mention video content, inform the user they can watch the video for details
+CRITICAL RULES:
+1. ONLY use information that is directly present in the sources below
+2. Do NOT make assumptions or add information not in the sources
+3. Do NOT provide generic advice or general knowledge
+4. If the exact information is in the sources, provide it word-for-word including names, emails, contacts, numbers, dates, steps, etc.
+5. If the information is NOT in the sources, say: "I don't have this information in the knowledge base. Please check the Confluence pages directly."
+6. ALWAYS extract and include specific details like:
+   - Names of people/teams
+   - Email addresses
+   - Phone numbers
+   - Specific steps or procedures
+   - Dates and deadlines
+   - Links and URLs
+   - Any structured data (tables, lists, etc.)
 
-Your response must be a direct answer based solely on the source content."""
-
-    # Check if we have relevant sources
-    if not hits:
-        return {
-            "answer": "I don't have any relevant information in the knowledge base to answer this question. Please check the Confluence documentation directly or rephrase your question.",
-            "sources": [],
-            "metadata": {"filtered_outdated_pages": filtered_count}
-        }
+Your response must be a direct extraction from the sources. Do not paraphrase or summarize unless necessary for clarity."""
 
     user_prompt = f"""Question: {q}
 
-Available Sources from Knowledge Base:
+Sources from Confluence Knowledge Base:
 {chr(10).join(snippets)}
 
 INSTRUCTIONS:
-- Answer ONLY using the information in the sources above
-- Do NOT add any information from outside the sources
-- If the answer is not in the sources, say so clearly
-- Be precise and specific - quote or paraphrase from the sources
-- If a source has video content, mention it
+1. Read through ALL the sources carefully
+2. Extract ONLY the information that directly answers the question
+3. If you find names, emails, contacts, or specific data - include them EXACTLY as written
+4. If the answer requires multiple pieces of information from different sources, combine them
+5. If the information is partial, state what you found and what's missing
+6. If the information is not in the sources at all, clearly state that
 
-Answer based strictly on the sources:"""
+Provide your answer based STRICTLY on the sources above:"""
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
 
-    # 6) Generate grounded response
+    # 6) Generate response with strict grounding
     chat_resp = client.chat.completions.create(
         model=CHAT_DEPLOYMENT,
         messages=messages,
-        max_tokens=600,
-        temperature=0.0,  # Zero temperature for strict grounding
+        max_tokens=1000,  # Increased for detailed answers
+        temperature=0.0,   # Zero temperature for factual accuracy
         top_p=1.0,
         frequency_penalty=0.0,
         presence_penalty=0.0
@@ -245,7 +234,8 @@ Answer based strictly on the sources:"""
         "answer": assistant_text, 
         "sources": hits,
         "metadata": {
-            "filtered_outdated_pages": filtered_count
+            "filtered_outdated_pages": filtered_count,
+            "total_sources_used": len(hits)
         }
     }
 
