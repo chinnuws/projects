@@ -1,17 +1,10 @@
 """
 FastAPI RAG endpoint (backend.py)
-
-- /api/query : POST {query, top_k?}
-returns {"answer": "...", "sources":[{title,url,content,has_video}]}
-
-This uses:
-- Azure OpenAI embeddings for query
-- Azure Cognitive Search vector search
-- Azure OpenAI Chat for final answer
 """
 
 import os
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 from dotenv import load_dotenv
@@ -59,6 +52,15 @@ search_client = SearchClient(
 
 app = FastAPI(title="Confluence RAG API")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class QueryReq(BaseModel):
     query: str
     top_k: int = 5
@@ -71,36 +73,43 @@ def query_endpoint(req: QueryReq):
     # 1) embed query
     q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=q).data[0].embedding
 
-    # 2) vector search in Azure Cognitive Search
+    # 2) vector search
     vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=k, fields="vector")
     results = search_client.search(
         search_text="",
         vector_queries=[vector_query],
-        select=["id", "title", "content", "url", "page_id", "last_modified", "has_video"],  # MODIFIED
+        select=["id", "title", "content", "url", "page_id", "last_modified", "has_video"],
         filter=f"space eq '{SPACE_KEY}'" if SPACE_KEY else None
     )
 
     hits = []
+    seen_pages = set()
+    
     for r in results:
-        hits.append({
-            "id": r["id"],
-            "title": r.get("title"),
-            "content": r.get("content"),
-            "url": r.get("url"),
-            "has_video": r.get("has_video", False)  # NEW FIELD
-        })
+        page_id = r.get("page_id")
+        # Only include unique pages
+        if page_id not in seen_pages:
+            seen_pages.add(page_id)
+            hits.append({
+                "id": r["id"],
+                "title": r.get("title", ""),
+                "content": r.get("content", ""),
+                "url": r.get("url", ""),
+                "has_video": r.get("has_video", False)
+            })
 
-    # 3) build prompt - NO INLINE CITATIONS
+    # 3) build prompt
     snippets = []
     for i, h in enumerate(hits):
         snippet = h["content"]
         if len(snippet) > 900:
             snippet = snippet[:900] + "..."
-        video_indicator = " [Contains Video]" if h.get("has_video") else ""
-        snippets.append(f"Source {i+1}: {h.get('title')}{video_indicator}\n{snippet}\nURL: {h.get('url')}")
+        
+        video_note = " [This page contains video content]" if h.get("has_video") else ""
+        snippets.append(f"Source {i+1}: {h.get('title')}{video_note}\n{snippet}\nURL: {h.get('url')}")
 
-    system_prompt = "You are an assistant that answers questions based only on the provided Confluence sources. If the answer is not contained in the sources, say you don't know and suggest how to proceed."
-    user_prompt = f"User question: {q}\n\nHere are the sources:\n\n" + "\n\n".join(snippets) + "\n\nAnswer concisely in a natural, conversational way without including source citations in your response."
+    system_prompt = "You are an assistant that answers questions based only on the provided Confluence sources. If the answer is not contained in the sources, say you don't know. When a source contains video content, mention that users can watch the video for more details."
+    user_prompt = f"User question: {q}\n\nHere are the sources:\n\n" + "\n\n".join(snippets) + "\n\nAnswer concisely and naturally."
 
     messages = [
         {"role": "system", "content": system_prompt},
