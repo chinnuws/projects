@@ -1,8 +1,10 @@
 """
 FastAPI RAG endpoint (backend.py)
+Enhanced with intelligent query processing and contextual understanding
 """
 
 import os
+import re
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -65,16 +67,82 @@ class QueryReq(BaseModel):
     query: str
     top_k: int = 5
 
+def expand_query(query: str) -> str:
+    """
+    Expand the query with contextual understanding to improve search results.
+    This helps handle various phrasings and informal language.
+    """
+    # Use LLM to expand/rephrase query for better semantic understanding
+    expansion_prompt = f"""Given this user question, generate an expanded version that captures the semantic meaning and intent, including related terms and concepts. Keep it concise.
+
+Original question: {query}
+
+Expanded question (one sentence):"""
+    
+    try:
+        expansion_response = client.chat.completions.create(
+            model=CHAT_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You are a query expansion assistant. Expand user queries to capture semantic meaning while staying concise."},
+                {"role": "user", "content": expansion_prompt}
+            ],
+            max_tokens=100,
+            temperature=0.3
+        )
+        expanded = expansion_response.choices[0].message.content.strip()
+        # Combine original and expanded for better coverage
+        return f"{query} {expanded}"
+    except:
+        return query
+
+def rerank_results(query: str, results: List[dict]) -> List[dict]:
+    """
+    Rerank results based on relevance to the query using semantic understanding.
+    """
+    if len(results) <= 1:
+        return results
+    
+    # Simple relevance scoring based on content overlap
+    scored_results = []
+    query_lower = query.lower()
+    query_terms = set(re.findall(r'\w+', query_lower))
+    
+    for result in results:
+        content = result.get('content', '').lower()
+        title = result.get('title', '').lower()
+        
+        # Calculate relevance score
+        content_terms = set(re.findall(r'\w+', content))
+        title_terms = set(re.findall(r'\w+', title))
+        
+        # Term overlap scoring
+        content_overlap = len(query_terms & content_terms) / max(len(query_terms), 1)
+        title_overlap = len(query_terms & title_terms) / max(len(query_terms), 1)
+        
+        # Title matches are more important
+        relevance_score = (title_overlap * 2.0) + (content_overlap * 1.0)
+        
+        scored_results.append((relevance_score, result))
+    
+    # Sort by relevance score
+    scored_results.sort(reverse=True, key=lambda x: x[0])
+    
+    return [result for _, result in scored_results]
+
 @app.post("/api/query")
 def query_endpoint(req: QueryReq):
     q = req.query
-    k = req.top_k if req.top_k and req.top_k > 0 else 5
+    k = min(req.top_k if req.top_k and req.top_k > 0 else 5, 10)  # Cap at 10
 
-    # 1) embed query
-    q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=q).data[0].embedding
+    # 1) Expand query for better semantic understanding
+    expanded_query = expand_query(q)
+    
+    # 2) Embed the expanded query
+    q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=expanded_query).data[0].embedding
 
-    # 2) vector search
-    vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=k, fields="vector")
+    # 3) Vector search with higher k to allow for reranking
+    search_k = min(k * 2, 20)  # Get more results for reranking
+    vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=search_k, fields="vector")
     results = search_client.search(
         search_text="",
         vector_queries=[vector_query],
@@ -82,12 +150,12 @@ def query_endpoint(req: QueryReq):
         filter=f"space eq '{SPACE_KEY}'" if SPACE_KEY else None
     )
 
+    # 4) Deduplicate by page_id and collect results
     hits = []
     seen_pages = set()
     
     for r in results:
         page_id = r.get("page_id")
-        # Only include unique pages
         if page_id not in seen_pages:
             seen_pages.add(page_id)
             hits.append({
@@ -98,31 +166,75 @@ def query_endpoint(req: QueryReq):
                 "has_video": r.get("has_video", False)
             })
 
-    # 3) build prompt
+    # 5) Rerank results based on relevance
+    hits = rerank_results(q, hits)[:k]  # Take top k after reranking
+
+    # 6) Build enhanced prompt with better context understanding
     snippets = []
     for i, h in enumerate(hits):
         snippet = h["content"]
-        if len(snippet) > 900:
-            snippet = snippet[:900] + "..."
+        if len(snippet) > 1200:
+            snippet = snippet[:1200] + "..."
         
-        video_note = " [This page contains video content]" if h.get("has_video") else ""
-        snippets.append(f"Source {i+1}: {h.get('title')}{video_note}\n{snippet}\nURL: {h.get('url')}")
+        video_note = " [📹 Contains video content]" if h.get("has_video") else ""
+        snippets.append(f"""
+Source {i+1}: {h.get('title')}{video_note}
+Content: {snippet}
+URL: {h.get('url')}
+""")
 
-    system_prompt = "You are an assistant that answers questions based only on the provided Confluence sources. If the answer is not contained in the sources, say you don't know. When a source contains video content, mention that users can watch the video for more details."
-    user_prompt = f"User question: {q}\n\nHere are the sources:\n\n" + "\n\n".join(snippets) + "\n\nAnswer concisely and naturally."
+    # Enhanced system prompt for better understanding
+    system_prompt = """You are an intelligent Confluence knowledge assistant with expertise in understanding context and user intent.
+
+Your capabilities:
+- Understand questions regardless of phrasing (casual, formal, technical, or incomplete)
+- Extract the core intent and context from user queries
+- Provide accurate, precise answers based on the provided sources
+- Synthesize information from multiple sources when relevant
+- Recognize when information is incomplete or unavailable
+
+Guidelines:
+- If the answer is in the sources, provide it clearly and concisely
+- If sources contain partial information, synthesize a helpful response and mention what's available
+- If the answer isn't in the sources, acknowledge this clearly and suggest what might help
+- When video content is available, mention it as an additional resource
+- Use natural, conversational language while being professional
+- Focus on the user's actual need, not just the literal question"""
+
+    user_prompt = f"""User Question: {q}
+
+Available Sources:
+{chr(10).join(snippets)}
+
+Instructions:
+1. Understand the core intent of the user's question (even if phrased informally or incompletely)
+2. Find the most relevant information in the sources above
+3. Provide a precise, accurate answer that directly addresses the user's need
+4. If sources contain video content, mention it as additional reference
+5. If information is partial or missing, be transparent about it
+
+Answer:"""
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
 
+    # 7) Generate intelligent response
     chat_resp = client.chat.completions.create(
         model=CHAT_DEPLOYMENT,
         messages=messages,
-        max_tokens=512,
-        temperature=0.0
+        max_tokens=800,  # Increased for more comprehensive answers
+        temperature=0.2,  # Slight temperature for more natural responses
+        top_p=0.95,
+        frequency_penalty=0.3,  # Reduce repetition
+        presence_penalty=0.3   # Encourage diverse language
     )
 
     assistant_text = chat_resp.choices[0].message.content
 
     return {"answer": assistant_text, "sources": hits}
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "service": "Confluence Knowledge Base API"}
