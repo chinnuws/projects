@@ -18,7 +18,7 @@ API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 # Page config with custom theme
 st.set_page_config(
-    page_title="Knowledge base",
+    page_title="Confluence Knowledge Base",
     page_icon="📚",
     layout="centered",
     initial_sidebar_state="collapsed"
@@ -27,107 +27,113 @@ st.set_page_config(
 # Custom CSS for professional styling
 st.markdown("""
 <style>
-    /* Main container styling - Lighter background */
+    /* Main container styling */
     .main {
-        background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
         padding: 2rem;
     }
     
-    /* Remove box backgrounds from responses */
+    /* Chat container */
     .chat-container {
         background: transparent;
         padding: 1rem 0;
         margin-bottom: 1rem;
     }
     
-    /* Question styling - clean bubble */
+    /* Question styling */
     .user-message {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
         color: white;
         padding: 1.2rem 1.8rem;
-        border-radius: 25px 25px 5px 25px;
-        margin: 1rem 0;
+        border-radius: 20px 20px 5px 20px;
+        margin: 1.5rem 0;
         display: inline-block;
         max-width: 85%;
-        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+        box-shadow: 0 4px 12px rgba(74, 144, 226, 0.3);
         font-size: 1.05rem;
     }
     
-    /* Answer styling - professional white box with dark text */
+    /* Answer styling */
     .assistant-message {
         background: white;
-        color: #1a1a1a;
+        color: #2c3e50;
         padding: 1.8rem;
-        border-radius: 25px 25px 25px 5px;
-        margin: 1rem 0;
-        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-        line-height: 1.6;
+        border-radius: 20px 20px 20px 5px;
+        margin: 1.5rem 0;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        line-height: 1.7;
         font-size: 1.05rem;
-        border: 1px solid #e0e0e0;
+        border: 1px solid #e0e6ed;
     }
     
     /* Source item styling */
     .source-item {
         background: white;
-        padding: 1rem 1.2rem;
-        margin: 0.6rem 0;
+        padding: 1.2rem 1.5rem;
+        margin: 0.8rem 0;
         border-radius: 12px;
-        border-left: 5px solid #667eea;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.08);
+        border-left: 4px solid #4a90e2;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         transition: all 0.3s ease;
-        border: 1px solid #e8e8e8;
+        border: 1px solid #e8ecef;
     }
     
     .source-item:hover {
-        transform: translateX(5px);
-        box-shadow: 0 5px 10px rgba(0,0,0,0.12);
-        border-left-color: #764ba2;
+        transform: translateX(8px);
+        box-shadow: 0 4px 16px rgba(74, 144, 226, 0.15);
+        border-left-color: #357abd;
     }
     
     .source-item a {
-        color: #4a5bdc;
+        color: #4a90e2;
         text-decoration: none;
         font-weight: 600;
         font-size: 1.05rem;
     }
     
     .source-item a:hover {
-        color: #764ba2;
+        color: #357abd;
         text-decoration: underline;
     }
     
     .source-item p {
-        color: #444444;
+        color: #5a6c7d;
+        margin-top: 0.6rem;
     }
     
-    /* Header styling - Compact and centered */
+    /* Header styling */
     .header {
         text-align: center;
-        color: #2c3e50;
-        padding: 1rem 1rem 0.5rem 1rem;
-        margin-bottom: 1rem;
+        padding: 2rem 1rem 1.5rem 1rem;
+        margin-bottom: 2rem;
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.06);
     }
     
     .header h1 {
-        font-size: 2.2rem;
-        margin-bottom: 0.3rem;
+        font-size: 2.8rem;
+        margin-bottom: 0.5rem;
         font-weight: 700;
-        color: #1a1a1a;
+        color: #1a2332;
+        background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
     }
     
     .header p {
-        font-size: 1rem;
+        font-size: 1.1rem;
         font-weight: 400;
-        letter-spacing: 0.3px;
-        color: #666666;
-        margin-bottom: 0.5rem;
+        color: #5a6c7d;
+        margin-top: 0.5rem;
     }
     
     /* Icon badges */
     .icon-badge {
         display: inline-block;
-        padding: 0.3rem 0.6rem;
-        border-radius: 8px;
+        padding: 0.3rem 0.7rem;
+        border-radius: 6px;
         font-size: 0.85rem;
         margin-left: 0.5rem;
         font-weight: 600;
@@ -140,58 +146,67 @@ st.markdown("""
     
     /* Resources header */
     .resources-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
         color: white;
         font-size: 1.1rem;
         font-weight: 600;
-        margin: 1.5rem 0 1rem 0;
-        padding: 0.8rem 1.2rem;
+        margin: 2rem 0 1rem 0;
+        padding: 0.9rem 1.3rem;
         border-radius: 10px;
-        box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 3px 10px rgba(74, 144, 226, 0.3);
     }
     
-    /* Search form aligned to right */
+    /* Search form centered */
     .stForm {
-        max-width: 800px;
-        margin: 0 0 2rem auto;
+        max-width: 700px;
+        margin: 0 auto 2.5rem auto;
     }
     
-    /* Remove default Streamlit styling */
+    /* Search input styling */
     .stTextInput>div>div>input {
-        border-radius: 30px;
-        padding: 0.8rem 1.5rem;
-        font-size: 1rem;
-        border: 2px solid #d0d0d0;
-        color: #1a1a1a;
+        border-radius: 50px;
+        padding: 1rem 1.8rem;
+        font-size: 1.05rem;
+        border: 2px solid #d0d7de;
+        color: #2c3e50;
+        background: white;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        transition: all 0.3s ease;
+    }
+    
+    .stTextInput>div>div>input:focus {
+        border-color: #4a90e2;
+        box-shadow: 0 4px 12px rgba(74, 144, 226, 0.2);
     }
     
     .stTextInput>div>div>input::placeholder {
-        color: #888888;
+        color: #9ca3af;
     }
     
+    /* Search button styling */
     .stButton>button {
-        border-radius: 30px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 50px;
+        background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
         color: white;
         border: none;
-        padding: 0.8rem 2rem;
+        padding: 1rem 2.5rem;
         font-weight: 600;
-        font-size: 1rem;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        font-size: 1.05rem;
+        box-shadow: 0 4px 12px rgba(74, 144, 226, 0.3);
         transition: all 0.3s ease;
     }
     
     .stButton>button:hover {
-        background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        background: linear-gradient(135deg, #357abd 0%, #2868a8 100%);
         transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(0,0,0,0.25);
+        box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
     }
     
     /* Divider */
     .chat-divider {
-        margin: 2rem 0;
+        margin: 2.5rem 0;
         border: none;
-        border-top: 2px solid #d0d0d0;
+        border-top: 2px solid #e0e6ed;
     }
     
     /* Form labels */
@@ -202,11 +217,11 @@ st.markdown("""
     /* Video link styling */
     .video-link {
         display: inline-block;
-        margin-top: 0.5rem;
-        padding: 0.4rem 0.8rem;
-        background: #f0f4ff;
+        margin-top: 0.8rem;
+        padding: 0.6rem 1rem;
+        background: linear-gradient(135deg, #fff5f5 0%, #ffe5e5 100%);
         border-radius: 8px;
-        border: 1px solid #d0deff;
+        border: 1px solid #ffd0d0;
     }
     
     .video-link a {
@@ -222,11 +237,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Header - Compact version
+# Header
 st.markdown('''
 <div class="header">
-    <h1>📚 Knowledge base</h1>
-    <p>💡 Guide to organizational documentation</p>
+    <h1>📚 Confluence Knowledge Base</h1>
+    <p>💡 Your intelligent guide to organizational documentation</p>
 </div>
 ''', unsafe_allow_html=True)
 
@@ -234,22 +249,22 @@ st.markdown('''
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Input form - Aligned to the right with spacer column
+# Input form - Centered with rocket icon
 with st.form("query_form", clear_on_submit=True):
-    spacer, col1, col2 = st.columns([1, 4, 1])
+    col1, col2 = st.columns([5, 1])
     
     with col1:
         query = st.text_input(
             "💬 Your Question", 
             "", 
-            placeholder="Type your question here... e.g., 'Onboarding Documentation?'", 
+            placeholder="Type your question here... e.g., 'How to onboard new employees?'", 
             label_visibility="collapsed"
         )
     
     with col2:
-        submitted = st.form_submit_button("🔍 Search", use_container_width=True)
+        submitted = st.form_submit_button("🚀 Search", use_container_width=True)
     
-    top_k = 5  # Hidden parameter
+    top_k = 5
 
 # Process query
 if submitted and query.strip():
@@ -291,36 +306,33 @@ if st.session_state.history:
         # Assistant answer
         st.markdown(f"""
         <div class="assistant-message">
-            <strong style="color: #1a1a1a;">💬 Answer:</strong><br/><br/>
+            <strong style="color: #2c3e50;">💬 Answer:</strong><br/><br/>
             <span style="color: #2c3e50;">{item['answer']}</span>
         </div>
         """, unsafe_allow_html=True)
         
-        # Sources with enhanced styling
+        # Sources
         if item.get("sources"):
             st.markdown('<div class="resources-header">📖 Related Documentation</div>', unsafe_allow_html=True)
             for i, src in enumerate(item["sources"], 1):
-                # Video indicator badge and link
                 has_video = src.get("has_video", False)
                 video_badge = '<span class="icon-badge video-badge">🎥 Video</span>' if has_video else ""
                 
-                # Video link section (always show URL if video exists)
+                # Video link section
                 video_link_html = ""
                 if has_video:
-                    video_link_html = f'<div class="video-link">🎥 <a href="{src["url"]}" target="_blank">Watch Video on this page</a></div>'
+                    video_link_html = f'<div class="video-link">🎥 <a href="{src["url"]}" target="_blank" rel="noopener noreferrer">Watch Video on this page</a></div>'
                 
-                # Truncate content preview
                 content_preview = src['content'][:180] + "..." if len(src['content']) > 180 else src['content']
                 
                 st.markdown(f"""
                 <div class='source-item'>
-                    <strong style="color: #1a1a1a;">📄 {i}. <a href='{src['url']}' target='_blank'>{src['title']}</a></strong>{video_badge}
-                    <p style='font-size: 0.95rem; color: #444444; margin-top: 0.5rem; line-height: 1.5;'>{content_preview}</p>
+                    <strong style="color: #2c3e50;">📄 {i}. <a href='{src['url']}' target='_blank' rel='noopener noreferrer'>{src['title']}</a></strong>{video_badge}
+                    <p style='font-size: 0.95rem; color: #5a6c7d; margin-top: 0.6rem; line-height: 1.6;'>{content_preview}</p>
                     {video_link_html}
                 </div>
                 """, unsafe_allow_html=True)
         
-        # Divider between conversations
         if idx < len(st.session_state.history) - 1:
             st.markdown('<hr class="chat-divider">', unsafe_allow_html=True)
     
