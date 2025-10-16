@@ -1,6 +1,7 @@
 """
 FastAPI RAG endpoint (backend.py)
 Enhanced with intelligent query processing and contextual understanding
+Filters out outdated pages from results
 """
 
 import os
@@ -66,6 +67,37 @@ app.add_middleware(
 class QueryReq(BaseModel):
     query: str
     top_k: int = 5
+
+def is_outdated_page(title: str, content: str) -> bool:
+    """
+    Check if a page is marked as outdated based on title or content.
+    Returns True if the page should be filtered out.
+    """
+    # Patterns that indicate outdated content
+    outdated_patterns = [
+        r'\boutdated\s+version\b',
+        r'\boldated\s+version\b',
+        r'\barchived\s+version\b',
+        r'\blegacy\s+version\b',
+        r'\bdeprecated\b',
+        r'\bno\s+longer\s+valid\b',
+        r'\bno\s+longer\s+current\b',
+        r'\bold\s+version\b',
+        r'\bsuperseded\b',
+        r'\bobsolete\b',
+        r'\[\s*outdated\s*\]',
+        r'\[\s*deprecated\s*\]',
+        r'\[\s*archived\s*\]'
+    ]
+    
+    # Check title and content (case-insensitive)
+    text_to_check = f"{title} {content[:500]}".lower()
+    
+    for pattern in outdated_patterns:
+        if re.search(pattern, text_to_check, re.IGNORECASE):
+            return True
+    
+    return False
 
 def expand_query(query: str) -> str:
     """
@@ -140,8 +172,8 @@ def query_endpoint(req: QueryReq):
     # 2) Embed the expanded query
     q_emb = client.embeddings.create(model=EMBED_DEPLOYMENT, input=expanded_query).data[0].embedding
 
-    # 3) Vector search with higher k to allow for reranking
-    search_k = min(k * 2, 20)  # Get more results for reranking
+    # 3) Vector search with higher k to allow for filtering and reranking
+    search_k = min(k * 3, 30)  # Get more results to account for filtering outdated pages
     vector_query = VectorizedQuery(vector=q_emb, k_nearest_neighbors=search_k, fields="vector")
     results = search_client.search(
         search_text="",
@@ -150,21 +182,33 @@ def query_endpoint(req: QueryReq):
         filter=f"space eq '{SPACE_KEY}'" if SPACE_KEY else None
     )
 
-    # 4) Deduplicate by page_id and collect results
+    # 4) Deduplicate by page_id, filter outdated pages, and collect results
     hits = []
     seen_pages = set()
+    filtered_count = 0
     
     for r in results:
         page_id = r.get("page_id")
-        if page_id not in seen_pages:
-            seen_pages.add(page_id)
-            hits.append({
-                "id": r["id"],
-                "title": r.get("title", ""),
-                "content": r.get("content", ""),
-                "url": r.get("url", ""),
-                "has_video": r.get("has_video", False)
-            })
+        title = r.get("title", "")
+        content = r.get("content", "")
+        
+        # Skip if already seen
+        if page_id in seen_pages:
+            continue
+            
+        # Filter out outdated pages
+        if is_outdated_page(title, content):
+            filtered_count += 1
+            continue
+        
+        seen_pages.add(page_id)
+        hits.append({
+            "id": r["id"],
+            "title": title,
+            "content": content,
+            "url": r.get("url", ""),
+            "has_video": r.get("has_video", False)
+        })
 
     # 5) Rerank results based on relevance
     hits = rerank_results(q, hits)[:k]  # Take top k after reranking
@@ -192,6 +236,7 @@ Your capabilities:
 - Provide accurate, precise answers based on the provided sources
 - Synthesize information from multiple sources when relevant
 - Recognize when information is incomplete or unavailable
+- Only reference current, up-to-date information (outdated content has been filtered out)
 
 Guidelines:
 - If the answer is in the sources, provide it clearly and concisely
@@ -203,7 +248,7 @@ Guidelines:
 
     user_prompt = f"""User Question: {q}
 
-Available Sources:
+Available Sources (current and up-to-date):
 {chr(10).join(snippets)}
 
 Instructions:
@@ -233,7 +278,13 @@ Answer:"""
 
     assistant_text = chat_resp.choices[0].message.content
 
-    return {"answer": assistant_text, "sources": hits}
+    return {
+        "answer": assistant_text, 
+        "sources": hits,
+        "metadata": {
+            "filtered_outdated_pages": filtered_count
+        }
+    }
 
 @app.get("/health")
 def health_check():
