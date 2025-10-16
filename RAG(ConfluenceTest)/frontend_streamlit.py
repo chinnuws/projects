@@ -154,7 +154,7 @@ st.markdown("""
     /* Search form */
     .stForm {
         max-width: 700px;
-        margin: 0 auto 1.5rem auto;
+        margin: 0 auto 1rem auto;
     }
     
     /* Search input */
@@ -178,7 +178,7 @@ st.markdown("""
         color: #9ca3af;
     }
     
-    /* All buttons - default blue styling */
+    /* All buttons */
     .stButton>button {
         border-radius: 50px;
         background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
@@ -224,13 +224,6 @@ st.markdown("""
     .video-link a:hover {
         text-decoration: underline;
     }
-    
-    /* Clear button container */
-    .clear-button-container {
-        max-width: 700px;
-        margin: 0 auto 2rem auto;
-        text-align: center;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -246,7 +239,7 @@ st.markdown('''
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Input form
+# Input form with search button
 with st.form("query_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     
@@ -263,12 +256,15 @@ with st.form("query_form", clear_on_submit=True):
     
     top_k = 10
 
-# Clear chat button (centered below search form)
-st.markdown('<div class="clear-button-container">', unsafe_allow_html=True)
-if st.button("🗑️ Clear Chat History", use_container_width=False, key="clear_button"):
-    st.session_state.history = []
-    st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
+# Clear chat history button - same format as search
+col1_clear, col2_clear = st.columns([5, 1])
+with col2_clear:
+    if st.button("🗑️ Clear", use_container_width=True):
+        st.session_state.history = []
+        st.rerun()
+
+# Add spacing
+st.markdown("<br/>", unsafe_allow_html=True)
 
 # Process query
 if submitted and query.strip():
