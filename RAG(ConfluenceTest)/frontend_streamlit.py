@@ -154,7 +154,7 @@ st.markdown("""
     /* Search form */
     .stForm {
         max-width: 700px;
-        margin: 0 auto 2.5rem auto;
+        margin: 0 auto 1.5rem auto;
     }
     
     /* Search input */
@@ -178,7 +178,7 @@ st.markdown("""
         color: #9ca3af;
     }
     
-    /* Buttons */
+    /* Search buttons */
     .stButton>button {
         border-radius: 50px;
         background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
@@ -197,56 +197,30 @@ st.markdown("""
         box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
     }
     
-    /* Clear button container - right aligned */
+    /* Clear chat button container */
     .clear-button-container {
+        max-width: 700px;
+        margin: 0 auto 2rem auto;
         display: flex;
         justify-content: flex-end;
-        margin-bottom: 1.5rem;
-        max-width: 700px;
-        margin-left: auto;
-        margin-right: auto;
     }
     
-    /* Clear button specific styling */
-    .clear-chat-button {
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        border: 2px solid #dee2e6;
-        color: #6c757d;
-        padding: 0.6rem 1.5rem;
-        border-radius: 25px;
+    /* Clear chat button specific styling */
+    div[data-testid="column"]:nth-of-type(2) .stButton>button {
+        background: linear-gradient(135deg, #6c757d 0%, #495057 100%);
+        color: white;
+        border-radius: 30px;
+        padding: 0.7rem 1.5rem;
+        font-size: 0.95rem;
         font-weight: 600;
-        font-size: 0.95rem;
-        cursor: pointer;
-        transition: all 0.3s ease;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
+        box-shadow: 0 3px 8px rgba(108, 117, 125, 0.25);
+        border: 1px solid rgba(255, 255, 255, 0.1);
     }
     
-    .clear-chat-button:hover {
-        background: linear-gradient(135deg, #fff 0%, #f8f9fa 100%);
-        border-color: #adb5bd;
-        color: #495057;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 10px rgba(0,0,0,0.12);
-    }
-    
-    /* Override default clear button styling */
-    div[data-testid="column"]:nth-child(2) .stButton>button {
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        border: 2px solid #dee2e6;
-        color: #6c757d;
-        padding: 0.6rem 1.5rem;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-        font-size: 0.95rem;
-    }
-    
-    div[data-testid="column"]:nth-child(2) .stButton>button:hover {
-        background: linear-gradient(135deg, #fff 0%, #f8f9fa 100%);
-        border-color: #adb5bd;
-        color: #495057;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+    div[data-testid="column"]:nth-of-type(2) .stButton>button:hover {
+        background: linear-gradient(135deg, #495057 0%, #343a40 100%);
+        box-shadow: 0 4px 12px rgba(108, 117, 125, 0.35);
+        transform: translateY(-1px);
     }
     
     /* Divider */
@@ -308,13 +282,12 @@ with st.form("query_form", clear_on_submit=True):
     
     top_k = 10
 
-# Clear chat button - right aligned with elegant styling
-if st.session_state.history:
-    col_spacer, col_clear_btn = st.columns([5, 1])
-    with col_clear_btn:
-        if st.button("✨ Clear", use_container_width=True, key="clear_chat"):
-            st.session_state.history = []
-            st.rerun()
+# Clear chat button - Right aligned with elegant styling
+col_spacer, col_clear = st.columns([5.5, 1])
+with col_clear:
+    if st.button("✨ Clear Chat", use_container_width=True, key="clear_button"):
+        st.session_state.history = []
+        st.rerun()
 
 # Process query
 if submitted and query.strip():
