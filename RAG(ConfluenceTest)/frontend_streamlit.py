@@ -197,14 +197,56 @@ st.markdown("""
         box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
     }
     
-    /* Clear button styling */
-    div[data-testid="column"]:last-child .stButton>button {
-        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
-        padding: 1rem 2rem;
+    /* Clear button container - right aligned */
+    .clear-button-container {
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: 1.5rem;
+        max-width: 700px;
+        margin-left: auto;
+        margin-right: auto;
     }
     
-    div[data-testid="column"]:last-child .stButton>button:hover {
-        background: linear-gradient(135deg, #ee5a6f 0%, #dc3545 100%);
+    /* Clear button specific styling */
+    .clear-chat-button {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border: 2px solid #dee2e6;
+        color: #6c757d;
+        padding: 0.6rem 1.5rem;
+        border-radius: 25px;
+        font-weight: 600;
+        font-size: 0.95rem;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .clear-chat-button:hover {
+        background: linear-gradient(135deg, #fff 0%, #f8f9fa 100%);
+        border-color: #adb5bd;
+        color: #495057;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+    }
+    
+    /* Override default clear button styling */
+    div[data-testid="column"]:nth-child(2) .stButton>button {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border: 2px solid #dee2e6;
+        color: #6c757d;
+        padding: 0.6rem 1.5rem;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        font-size: 0.95rem;
+    }
+    
+    div[data-testid="column"]:nth-child(2) .stButton>button:hover {
+        background: linear-gradient(135deg, #fff 0%, #f8f9fa 100%);
+        border-color: #adb5bd;
+        color: #495057;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.12);
     }
     
     /* Divider */
@@ -249,7 +291,7 @@ st.markdown('''
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Input form with clear button
+# Input form
 with st.form("query_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     
@@ -264,14 +306,15 @@ with st.form("query_form", clear_on_submit=True):
     with col2:
         submitted = st.form_submit_button("🚀 Search", use_container_width=True)
     
-    top_k = 10  # Increased for better coverage
+    top_k = 10
 
-# Clear chat button (outside form)
-col_empty, col_clear = st.columns([4, 1])
-with col_clear:
-    if st.button("🗑️ Clear Chat", use_container_width=True):
-        st.session_state.history = []
-        st.rerun()
+# Clear chat button - right aligned with elegant styling
+if st.session_state.history:
+    col_spacer, col_clear_btn = st.columns([5, 1])
+    with col_clear_btn:
+        if st.button("✨ Clear", use_container_width=True, key="clear_chat"):
+            st.session_state.history = []
+            st.rerun()
 
 # Process query
 if submitted and query.strip():
