@@ -178,7 +178,7 @@ st.markdown("""
         color: #9ca3af;
     }
     
-    /* Search buttons */
+    /* All buttons - default blue styling */
     .stButton>button {
         border-radius: 50px;
         background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
@@ -195,32 +195,6 @@ st.markdown("""
         background: linear-gradient(135deg, #357abd 0%, #2868a8 100%);
         transform: translateY(-2px);
         box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
-    }
-    
-    /* Clear chat button container */
-    .clear-button-container {
-        max-width: 700px;
-        margin: 0 auto 2rem auto;
-        display: flex;
-        justify-content: flex-end;
-    }
-    
-    /* Clear chat button specific styling */
-    div[data-testid="column"]:nth-of-type(2) .stButton>button {
-        background: linear-gradient(135deg, #6c757d 0%, #495057 100%);
-        color: white;
-        border-radius: 30px;
-        padding: 0.7rem 1.5rem;
-        font-size: 0.95rem;
-        font-weight: 600;
-        box-shadow: 0 3px 8px rgba(108, 117, 125, 0.25);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    div[data-testid="column"]:nth-of-type(2) .stButton>button:hover {
-        background: linear-gradient(135deg, #495057 0%, #343a40 100%);
-        box-shadow: 0 4px 12px rgba(108, 117, 125, 0.35);
-        transform: translateY(-1px);
     }
     
     /* Divider */
@@ -249,6 +223,13 @@ st.markdown("""
     
     .video-link a:hover {
         text-decoration: underline;
+    }
+    
+    /* Clear button container */
+    .clear-button-container {
+        max-width: 700px;
+        margin: 0 auto 2rem auto;
+        text-align: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -282,12 +263,12 @@ with st.form("query_form", clear_on_submit=True):
     
     top_k = 10
 
-# Clear chat button - Right aligned with elegant styling
-col_spacer, col_clear = st.columns([5.5, 1])
-with col_clear:
-    if st.button("✨ Clear Chat", use_container_width=True, key="clear_button"):
-        st.session_state.history = []
-        st.rerun()
+# Clear chat button (centered below search form)
+st.markdown('<div class="clear-button-container">', unsafe_allow_html=True)
+if st.button("🗑️ Clear Chat History", use_container_width=False, key="clear_button"):
+    st.session_state.history = []
+    st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
 
 # Process query
 if submitted and query.strip():
