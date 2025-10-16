@@ -178,7 +178,7 @@ st.markdown("""
         color: #9ca3af;
     }
     
-    /* All buttons */
+    /* Search button */
     .stButton>button {
         border-radius: 50px;
         background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
@@ -195,6 +195,31 @@ st.markdown("""
         background: linear-gradient(135deg, #357abd 0%, #2868a8 100%);
         transform: translateY(-2px);
         box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
+    }
+    
+    /* Clear button container */
+    .clear-button-container {
+        max-width: 700px;
+        margin: 0 auto 2.5rem auto;
+        text-align: center;
+    }
+    
+    /* Clear button specific styling */
+    .clear-button-container .stButton>button {
+        background: white;
+        color: #6c757d;
+        border: 2px solid #e0e6ed;
+        padding: 0.7rem 2rem;
+        font-size: 0.95rem;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+    }
+    
+    .clear-button-container .stButton>button:hover {
+        background: #f8f9fa;
+        color: #495057;
+        border-color: #d0d7de;
+        transform: translateY(-1px);
+        box-shadow: 0 3px 8px rgba(0,0,0,0.08);
     }
     
     /* Divider */
@@ -239,7 +264,7 @@ st.markdown('''
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Input form with search button
+# Input form
 with st.form("query_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     
@@ -256,15 +281,12 @@ with st.form("query_form", clear_on_submit=True):
     
     top_k = 10
 
-# Clear chat history button - same format as search
-col1_clear, col2_clear = st.columns([5, 1])
-with col2_clear:
-    if st.button("🗑️ Clear", use_container_width=True):
-        st.session_state.history = []
-        st.rerun()
-
-# Add spacing
-st.markdown("<br/>", unsafe_allow_html=True)
+# Clear button (outside form, centered below search)
+st.markdown('<div class="clear-button-container">', unsafe_allow_html=True)
+if st.button("🗑️ Clear", use_container_width=False):
+    st.session_state.history = []
+    st.rerun()
+st.markdown('</div>', unsafe_allow_html=True)
 
 # Process query
 if submitted and query.strip():
