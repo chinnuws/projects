@@ -1,10 +1,5 @@
 """
 Streamlit chatbot frontend - Professional Design
-- Beautiful chat interface with enhanced styling
-- Professional icons and improved UX
-- Sends user's query to FastAPI /api/query
-- Displays answer and recommended links
-- Keeps chat history in session
 """
 
 import streamlit as st
@@ -16,7 +11,7 @@ load_dotenv()
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
-# Page config with custom theme
+# Page config
 st.set_page_config(
     page_title="Confluence Knowledge Base",
     page_icon="📚",
@@ -24,10 +19,10 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for professional styling
+# Custom CSS
 st.markdown("""
 <style>
-    /* Main container styling */
+    /* Main container */
     .main {
         background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
         padding: 2rem;
@@ -66,7 +61,7 @@ st.markdown("""
         border: 1px solid #e0e6ed;
     }
     
-    /* Source item styling */
+    /* Source item */
     .source-item {
         background: white;
         padding: 1.2rem 1.5rem;
@@ -101,7 +96,7 @@ st.markdown("""
         margin-top: 0.6rem;
     }
     
-    /* Header styling */
+    /* Header */
     .header {
         text-align: center;
         padding: 2rem 1rem 1.5rem 1rem;
@@ -156,13 +151,13 @@ st.markdown("""
         box-shadow: 0 3px 10px rgba(74, 144, 226, 0.3);
     }
     
-    /* Search form centered */
+    /* Search form */
     .stForm {
         max-width: 700px;
         margin: 0 auto 2.5rem auto;
     }
     
-    /* Search input styling */
+    /* Search input */
     .stTextInput>div>div>input {
         border-radius: 50px;
         padding: 1rem 1.8rem;
@@ -183,7 +178,7 @@ st.markdown("""
         color: #9ca3af;
     }
     
-    /* Search button styling */
+    /* Buttons */
     .stButton>button {
         border-radius: 50px;
         background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%);
@@ -202,6 +197,16 @@ st.markdown("""
         box-shadow: 0 6px 16px rgba(74, 144, 226, 0.4);
     }
     
+    /* Clear button styling */
+    div[data-testid="column"]:last-child .stButton>button {
+        background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+        padding: 1rem 2rem;
+    }
+    
+    div[data-testid="column"]:last-child .stButton>button:hover {
+        background: linear-gradient(135deg, #ee5a6f 0%, #dc3545 100%);
+    }
+    
     /* Divider */
     .chat-divider {
         margin: 2.5rem 0;
@@ -209,12 +214,7 @@ st.markdown("""
         border-top: 2px solid #e0e6ed;
     }
     
-    /* Form labels */
-    label {
-        color: #2c3e50 !important;
-    }
-    
-    /* Video link styling */
+    /* Video link */
     .video-link {
         display: inline-block;
         margin-top: 0.8rem;
@@ -249,7 +249,7 @@ st.markdown('''
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Input form - Centered with rocket icon
+# Input form with clear button
 with st.form("query_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     
@@ -264,7 +264,14 @@ with st.form("query_form", clear_on_submit=True):
     with col2:
         submitted = st.form_submit_button("🚀 Search", use_container_width=True)
     
-    top_k = 5
+    top_k = 10  # Increased for better coverage
+
+# Clear chat button (outside form)
+col_empty, col_clear = st.columns([4, 1])
+with col_clear:
+    if st.button("🗑️ Clear Chat", use_container_width=True):
+        st.session_state.history = []
+        st.rerun()
 
 # Process query
 if submitted and query.strip():
@@ -318,7 +325,6 @@ if st.session_state.history:
                 has_video = src.get("has_video", False)
                 video_badge = '<span class="icon-badge video-badge">🎥 Video</span>' if has_video else ""
                 
-                # Video link section
                 video_link_html = ""
                 if has_video:
                     video_link_html = f'<div class="video-link">🎥 <a href="{src["url"]}" target="_blank" rel="noopener noreferrer">Watch Video on this page</a></div>'
