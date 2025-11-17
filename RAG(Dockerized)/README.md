@@ -1,30 +1,46 @@
-1. Build and Push Docker Images
-Build Images
-# Login to Azure Container Registry
-az acr login --name <your-acr-name>
+# Deployment Guide
 
-# Set variables
+This README shows commands and Kubernetes manifests for building, pushing, and deploying the Confluence KB app. Commands and code blocks are fenced so they render correctly on GitHub.
+
+## 1. Build and Push Docker Images
+
+### Login to Azure Container Registry
+```bash
+az acr login --name <your-acr-name>
+```
+
+### Set variables
+```bash
 ACR_NAME="<your-acr-name>"
 IMAGE_TAG="v1.0.0"
+```
 
-# Build backend
+### Build backend
+```bash
 docker build -f Dockerfile.backend -t ${ACR_NAME}.azurecr.io/confluence-kb-backend:${IMAGE_TAG} .
+```
 
-# Build frontend
+### Build frontend
+```bash
 docker build -f Dockerfile.frontend -t ${ACR_NAME}.azurecr.io/confluence-kb-frontend:${IMAGE_TAG} .
+```
 
-# Build ingestion job
+### Build ingestion job
+```bash
 docker build -f Dockerfile.ingest -t ${ACR_NAME}.azurecr.io/confluence-kb-ingest:${IMAGE_TAG} .
+```
 
-
-2. Push Images
+## 2. Push Images
+```bash
 docker push ${ACR_NAME}.azurecr.io/confluence-kb-backend:${IMAGE_TAG}
 docker push ${ACR_NAME}.azurecr.io/confluence-kb-frontend:${IMAGE_TAG}
 docker push ${ACR_NAME}.azurecr.io/confluence-kb-ingest:${IMAGE_TAG}
+```
 
-3. Create Kubernetes Manifests
+## 3. Create Kubernetes Manifests
 
-# ConfigMap for Environment Variables (k8s/configmap.yaml)
+### ConfigMap for Environment Variables (`k8s/configmap.yaml`)
+```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -33,9 +49,10 @@ metadata:
 data:
   AZURE_SEARCH_INDEX: "confluence-vector-index"
   API_URL: "http://confluence-kb-backend:8000"
+```
 
-
-# Secret for Sensitive Data (k8s/secret.yaml)
+### Secret for Sensitive Data (`k8s/secret.yaml`)
+```yaml
 apiVersion: v1
 kind: Secret
 metadata:
@@ -53,8 +70,10 @@ stringData:
   AZURE_OPENAI_KEY: "<your-azure-openai-key>"
   AZURE_OPENAI_EMBED_DEPLOYMENT: "<your-embed-deployment>"
   AZURE_OPENAI_CHAT_DEPLOYMENT: "<your-chat-deployment>"
+```
 
-# Backend Deployment (k8s/backend-deployment.yaml)
+### Backend Deployment (`k8s/backend-deployment.yaml`)
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -113,9 +132,10 @@ spec:
     port: 8000
     targetPort: 8000
   type: ClusterIP
+```
 
-# -------------------------------------------------------
-# Frontend Deployment (k8s/frontend-deployment.yaml)
+### Frontend Deployment (`k8s/frontend-deployment.yaml`)
+```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -160,9 +180,10 @@ spec:
     port: 8501
     targetPort: 8501
   type: LoadBalancer
+```
 
-# -------------------------------------------------------
-# Ingestion CronJob (k8s/ingest-cronjob.yaml)
+### Ingestion CronJob (`k8s/ingest-cronjob.yaml`)
+```yaml
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -192,9 +213,10 @@ spec:
                 memory: "4Gi"
                 cpu: "2000m"
           restartPolicy: OnFailure
+```
 
-# -------------------------------------------------------
-# Ingress (k8s/ingress.yaml)
+### Ingress (`k8s/ingress.yaml`)
+```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -227,61 +249,67 @@ spec:
             name: confluence-kb-backend
             port:
               number: 8000
+```
 
-# -------------------------------------------------------
+## 4. Deploy to AKS
 
-4. Deploy to AKS
-
-# Deploy Application
-# Create namespace
+### Create namespace
+```bash
 kubectl create namespace confluence-kb
+```
 
-# Apply manifests
+### Apply manifests
+```bash
 kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/backend-deployment.yaml
 kubectl apply -f k8s/frontend-deployment.yaml
 kubectl apply -f k8s/ingest-cronjob.yaml
+```
 
-# For ingress (optional, install nginx-ingress controller first)
+### (Optional) Install ingress controller then apply ingress
+```bash
 kubectl apply -f k8s/ingress.yaml
+```
 
-# Check deployment status
+### Check deployment status
+```bash
 kubectl get pods -n confluence-kb
 kubectl get services -n confluence-kb
+```
 
-# Run Initial Ingestion
-# Create a one-time job from the CronJob
+### Run Initial Ingestion (one-time job from CronJob)
+```bash
 kubectl create job --from=cronjob/confluence-kb-ingest initial-ingest -n confluence-kb
-
-# Watch the job
 kubectl logs -f job/initial-ingest -n confluence-kb
+```
 
-# -------------------------------------------------------
+## 5. Monitoring and Scaling
 
-5. Monitoring and Scaling
-Check Application Health
-
-# View logs
+### View logs
+```bash
 kubectl logs -f deployment/confluence-kb-backend -n confluence-kb
 kubectl logs -f deployment/confluence-kb-frontend -n confluence-kb
+```
 
-# Check pod status
+### Check pod status
+```bash
 kubectl get pods -n confluence-kb -w
+```
 
-# Describe resources
+### Describe resources
+```bash
 kubectl describe deployment confluence-kb-backend -n confluence-kb
+```
 
-----------------------
-# Scale Application
-# Scale backend
+### Scale manually
+```bash
 kubectl scale deployment confluence-kb-backend --replicas=3 -n confluence-kb
-
-# Scale frontend
 kubectl scale deployment confluence-kb-frontend --replicas=3 -n confluence-kb
-----------------------
+```
 
-# Enable Horizontal Pod Autoscaling
+### Horizontal Pod Autoscaler example
+```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -301,14 +329,17 @@ spec:
       target:
         type: Utilization
         averageUtilization: 70
+```
 
-# -------------------------------------------------------
+## 6. Access the Application
 
-7. Access the Application
-
-# Get frontend service external IP
+### Get frontend service external IP
+```bash
 kubectl get service confluence-kb-frontend -n confluence-kb
+```
 
-# Access the application
-# Open browser to http://<EXTERNAL-IP>:8501
+Open a browser to:
+```
+http://<EXTERNAL-IP>:8501
+```
 
