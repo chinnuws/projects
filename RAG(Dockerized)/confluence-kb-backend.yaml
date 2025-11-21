@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: confluence-kb-backend
+  namespace: confluence-kb
+spec:
+  selector:
+    app: confluence-kb-backend
+  ports:
+    - protocol: TCP
+      port: 8000          # Service port (for API_URL and internal DNS)
+      targetPort: 8000    # Pod containerPort in backend Deployment
+  type: ClusterIP
