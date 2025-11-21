@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: confluence-kb-config
+  namespace: confluence-kb
+data:
+  # Application parameters
+  API_URL: "http://confluence-kb-backend:8000"
+  AZURE_SEARCH_INDEX: "confluence-vector-index"
+  # Azure Blob Storage Config (container name only)
+  BLOB_CONTAINER_NAME: "confluence-state"
+  CHUNK_MAX_CHARS: "3000"
+  CHUNK_OVERLAP_CHARS: "400"
+  BATCH_SIZE: "32"
