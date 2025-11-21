@@ -3,19 +3,14 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy requirements and install
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy ingestion script
 COPY ingest_and_index.py .
-COPY .env .
 
-# Run as a one-time job
+# Entrypoint (expects environment via Kubernetes ConfigMap/Secret)
 CMD ["python", "ingest_and_index.py"]
