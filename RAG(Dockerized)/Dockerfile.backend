@@ -3,22 +3,17 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy requirements file and install Python dependencies
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy backend code only
 COPY backend.py .
-COPY .env .
 
-# Expose port
+# Port for Uvicorn/FastAPI
 EXPOSE 8000
 
-# Run the application
+# Entrypoint (expects environment via Kubernetes ConfigMap/Secret)
 CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8000"]
