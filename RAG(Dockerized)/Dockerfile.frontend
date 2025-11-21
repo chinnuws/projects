@@ -3,22 +3,17 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy requirements and install
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy frontend code only
 COPY frontend_streamlit.py .
-COPY .env .
 
-# Expose Streamlit port
+# Port for Streamlit
 EXPOSE 8501
 
-# Run Streamlit
+# Entrypoint (expects environment via Kubernetes ConfigMap/Secret)
 CMD ["streamlit", "run", "frontend_streamlit.py", "--server.port=8501", "--server.address=0.0.0.0"]
