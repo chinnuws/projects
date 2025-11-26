@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: confluence-kb-ingest
+  namespace: confluence-kb
+spec:
+  schedule: "0 2 * * *"      # Every day at 2am
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: ingest
+            image: <your-acr>.azurecr.io/confluence-kb-ingest:<tag>
+            command: ["python"]
+            args: ["ingest_and_index.py"]
+            envFrom:
+            - configMapRef:
+                name: confluence-kb-config
+            - secretRef:
+                name: confluence-kb-secrets
+            volumeMounts:
+            - name: ingest-state
+              mountPath: /data       # Matches STATE_FILE path
+          restartPolicy: OnFailure
+          volumes:
+          - name: ingest-state
+            persistentVolumeClaim:
+              claimName: kb-ingest-state-pvc
