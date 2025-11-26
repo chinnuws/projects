@@ -1,20 +1,13 @@
-"""
-ingest_and_index.py
-Kubernetes-ready with Azure Blob Storage for state persistence
-All config from environment variables (ConfigMap/Secrets)
-"""
-
 import os
 import json
 import time
+import logging
+import re
 from typing import List, Dict, Any
 from urllib.parse import urljoin
-import logging
-import requests
 from html import unescape
-import re
-
-# Azure SDK imports
+import requests
+# Azure/OpenAI imports
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
@@ -24,115 +17,39 @@ from azure.search.documents.indexes.models import (
 )
 from azure.search.documents import SearchClient
 from openai import AzureOpenAI
-from azure.storage.blob import BlobServiceClient
 
-# ----- Get all config from environment variables (set by K8s) -----
-CONFLUENCE_BASE = os.environ.get("CONFLUENCE_BASE")
-CONFLUENCE_USER = os.environ.get("CONFLUENCE_USER")
-CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN")
-SPACE_KEY = os.environ.get("CONFLUENCE_SPACE_KEY")
-AZURE_SEARCH_ENDPOINT = os.environ.get("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_KEY = os.environ.get("AZURE_SEARCH_KEY")
+# ============ CONFIG ============
+
+# All values from Kubernetes ENV (ConfigMap or Secret)
+CONFLUENCE_BASE = os.environ["CONFLUENCE_BASE"]
+CONFLUENCE_USER = os.environ["CONFLUENCE_USER"]
+CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
+SPACE_KEY = os.environ["CONFLUENCE_SPACE_KEY"]
+AZURE_SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
+AZURE_SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
 AZURE_SEARCH_INDEX = os.environ.get("AZURE_SEARCH_INDEX", "confluence-vector-index")
-AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.environ.get("AZURE_OPENAI_KEY")
-EMBED_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBED_DEPLOYMENT")
+AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
+AZURE_OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
+EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBED_DEPLOYMENT"]
 CHAT_DEPLOYMENT = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT")
-
-# Azure Blob Storage config
-AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
-BLOB_CONTAINER_NAME = os.environ.get("BLOB_CONTAINER_NAME", "confluence-state")
-STATE_BLOB_NAME = "confluence_ingest_state.json"
-
-# Processing parameters
+STATE_FILE = os.environ.get("STATE_FILE", "/data/confluence_ingest_state.json")
 CHUNK_MAX_CHARS = int(os.environ.get("CHUNK_MAX_CHARS", "3000"))
 CHUNK_OVERLAP_CHARS = int(os.environ.get("CHUNK_OVERLAP_CHARS", "400"))
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "32"))
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Validate required environment variables
-required_env_vars = [
-    "CONFLUENCE_BASE",
-    "CONFLUENCE_USER",
-    "CONFLUENCE_API_TOKEN",
-    "SPACE_KEY",
-    "AZURE_SEARCH_ENDPOINT",
-    "AZURE_SEARCH_KEY",
-    "AZURE_OPENAI_ENDPOINT",
-    "AZURE_OPENAI_KEY",
-    "AZURE_OPENAI_EMBED_DEPLOYMENT",
-    "AZURE_STORAGE_CONNECTION_STRING"
-]
+# ============ AZURE CLIENTS ============
 
-missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
-if missing_vars:
-    raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
-# Initialize Azure clients
 client = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
     api_version="2023-05-15",
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
-
-blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-
-def load_state() -> Dict[str, Any]:
-    """Load state from Azure Blob Storage"""
-    try:
-        blob_client = blob_service_client.get_blob_client(
-            container=BLOB_CONTAINER_NAME,
-            blob=STATE_BLOB_NAME
-        )
-        
-        if blob_client.exists():
-            download_stream = blob_client.download_blob()
-            state_json = download_stream.readall().decode('utf-8')
-            logger.info("State loaded from Azure Blob Storage")
-            return json.loads(state_json)
-        else:
-            logger.info("No existing state found, creating new state")
-            return {"indexed_pages": {}, "last_run": None, "index_initialized": False}
-    except Exception as e:
-        logger.error(f"Error loading state from blob storage: {e}")
-        return {"indexed_pages": {}, "last_run": None, "index_initialized": False}
-
-def save_state(state: Dict[str, Any]):
-    """Save state to Azure Blob Storage"""
-    try:
-        container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
-        if not container_client.exists():
-            container_client.create_container()
-            logger.info(f"Created blob container: {BLOB_CONTAINER_NAME}")
-        
-        blob_client = blob_service_client.get_blob_client(
-            container=BLOB_CONTAINER_NAME,
-            blob=STATE_BLOB_NAME
-        )
-        
-        state_json = json.dumps(state, indent=2)
-        blob_client.upload_blob(state_json, overwrite=True)
-        logger.info("State saved to Azure Blob Storage")
-    except Exception as e:
-        logger.error(f"Error saving state to blob storage: {e}")
-        raise
-
-def chunk_text(text: str, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP_CHARS) -> List[str]:
-    if overlap >= max_chars:
-        raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_MAX_CHARS")
-    chunks = []
-    n = len(text)
-    i = 0
-    while i < n:
-        end = min(i + max_chars, n)
-        chunks.append(text[i:end])
-        i += max_chars - overlap
-    return [c for c in chunks if c]
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     try:
@@ -142,22 +59,23 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
         logger.error(f"Embedding failed: {e}")
         return [[0.0] * 1536 for _ in texts]
 
-def fix_confluence_url(base_url: str, webui_path: str, space_key: str, page_id: str) -> str:
-    """Ensure Confluence URL includes /wiki/ in the path"""
-    base = base_url.rstrip('/')
-    if webui_path:
-        if webui_path.startswith("/"):
-            if "/wiki" not in base and webui_path.startswith("/spaces"):
-                return f"{base}/wiki{webui_path}"
-            else:
-                return f"{base}{webui_path}"
-        else:
-            return urljoin(base, webui_path)
-    else:
-        if "/wiki" in base:
-            return f"{base}/spaces/{space_key}/pages/{page_id}"
-        else:
-            return f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+# ============ STATE HANDLING ============
+
+def load_state() -> Dict[str, Any]:
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as fh:
+            logger.info(f"Loaded ingest state from {STATE_FILE}")
+            return json.load(fh)
+    logger.info(f"No ingest state found, creating new state at: {STATE_FILE}")
+    return {"indexed_pages": {}, "last_run": None, "index_initialized": False}
+
+def save_state(state: Dict[str, Any]):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+    logger.info(f"State saved to {STATE_FILE}")
+
+# ============ AZURE SEARCH INDEX MGMT ============
 
 def ensure_index_exists():
     idx_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=AzureKeyCredential(AZURE_SEARCH_KEY))
@@ -226,6 +144,20 @@ def delete_docs_by_page_id(page_id: str):
         doc_client.index_documents(actions)
         logger.info(f"Deleted {len(batch_ids)} docs for page {page_id}")
 
+# ============ CONFLUENCE HELPERS ============
+
+def chunk_text(text: str, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP_CHARS) -> List[str]:
+    if overlap >= max_chars:
+        raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_MAX_CHARS")
+    chunks = []
+    n = len(text)
+    i = 0
+    while i < n:
+        end = min(i + max_chars, n)
+        chunks.append(text[i:end])
+        i += max_chars - overlap
+    return [c for c in chunks if c]
+
 def list_space_pages(space_key: str, start=0, limit=50):
     """Fetch pages from Confluence space"""
     url = f"{CONFLUENCE_BASE}/rest/api/content"
@@ -270,16 +202,31 @@ def has_video_content(storage_html: str) -> bool:
         r'vimeo\.com',
         r'youtu\.be'
     ]
-    
     for pattern in video_patterns:
         if re.search(pattern, storage_html, re.IGNORECASE):
             return True
     return False
 
+def fix_confluence_url(base_url: str, webui_path: str, space_key: str, page_id: str) -> str:
+    base = base_url.rstrip('/')
+    if webui_path:
+        if webui_path.startswith("/"):
+            if "/wiki" not in base and webui_path.startswith("/spaces"):
+                return f"{base}/wiki{webui_path}"
+            else:
+                return f"{base}{webui_path}"
+        else:
+            return urljoin(base, webui_path)
+    else:
+        if "/wiki" in base:
+            return f"{base}/spaces/{space_key}/pages/{page_id}"
+        else:
+            return f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+
+# ============ MAIN INGEST LOGIC ============
+
 def run_ingest():
-    """Main ingestion function"""
     logger.info("Starting Confluence ingestion process")
-    
     state = load_state()
     ensure_index_exists()
     state["index_initialized"] = True
@@ -305,7 +252,7 @@ def run_ingest():
     previously_indexed = state.get("indexed_pages", {})
     deleted = [pid for pid in previously_indexed.keys() if pid not in current_versions]
     if deleted:
-        logger.info(f"Deleted pages detected: {len(deleted)}")
+        logger.info(f"Deleted pages detected: {deleted}")
         for pid in deleted:
             delete_docs_by_page_id(pid)
             state["indexed_pages"].pop(pid, None)
@@ -319,29 +266,23 @@ def run_ingest():
             to_update.append(pid)
 
     logger.info(f"Pages to update (new/changed): {len(to_update)}")
-
     all_docs = []
     for pid in to_update:
         try:
             page = fetch_page(pid)
             title = page.get("title", "")
-            
             links = page.get("_links", {})
             webui = links.get("webui", "")
             url = fix_confluence_url(CONFLUENCE_BASE, webui, SPACE_KEY, pid)
-
             storage = page.get("body", {}).get("storage", {}).get("value", "")
             text = convert_storage_to_text(storage)
             has_video = has_video_content(storage)
-
             chunks = chunk_text(text)
             labels = []
             if page.get("metadata", {}).get("labels"):
                 labels = [l.get("name") for l in page["metadata"]["labels"].get("results", [])]
-
             last_modified = page.get("version", {}).get("when")
             version_num = page.get("version", {}).get("number", 1)
-
             for i in range(0, len(chunks), BATCH_SIZE):
                 batch_chunks = chunks[i:i+BATCH_SIZE]
                 embeddings = embed_texts(batch_chunks)
@@ -361,7 +302,6 @@ def run_ingest():
                         "vector": embeddings[j]
                     }
                     all_docs.append(doc)
-                    
             logger.info(f"Processed page: {title} ({pid})")
         except Exception as e:
             logger.error(f"Error processing page {pid}: {e}")
@@ -375,9 +315,7 @@ def run_ingest():
 
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     save_state(state)
-    
     logger.info(f"Ingestion complete. Total docs indexed: {len(all_docs)}")
-    logger.info(f"Total pages tracked: {len(state['indexed_pages'])}")
 
 if __name__ == "__main__":
     try:
