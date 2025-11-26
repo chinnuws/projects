@@ -1,150 +1,92 @@
-"""
-ingest_and_index.py
-Single-file incremental ingest for Confluence -> Azure Cognitive Search (vector index).
-"""
-
 import os
 import json
 import time
+import logging
+import re
 from typing import List, Dict, Any
 from urllib.parse import urljoin
-import logging
-import requests
 from html import unescape
-import re
-from dotenv import load_dotenv
-load_dotenv()
-
-# Azure Search
+import requests
+# Azure/OpenAI imports
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
-    SearchIndex,
-    SimpleField,
-    SearchableField,
-    SearchField,
-    SearchFieldDataType,
-    VectorSearch,
-    HnswAlgorithmConfiguration,
+    SearchIndex, SimpleField, SearchableField, SearchField,
+    SearchFieldDataType, VectorSearch, HnswAlgorithmConfiguration,
     VectorSearchProfile
 )
 from azure.search.documents import SearchClient
-
-# Azure OpenAI
 from openai import AzureOpenAI
 
-# ----- Config (from env) -----
-CONFLUENCE_BASE = os.getenv("CONFLUENCE_BASE")
-CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
-CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
-SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
-AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
-AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-vector-index")
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
-CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
-STATE_FILE = os.getenv("STATE_FILE", "./confluence_ingest_state.json")
-CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "3000"))
-CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))
+# ============ CONFIG ============
 
-logging.basicConfig(level=logging.INFO)
+# All values from Kubernetes ENV (ConfigMap or Secret)
+CONFLUENCE_BASE = os.environ["CONFLUENCE_BASE"]
+CONFLUENCE_USER = os.environ["CONFLUENCE_USER"]
+CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
+SPACE_KEY = os.environ["CONFLUENCE_SPACE_KEY"]
+AZURE_SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
+AZURE_SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
+AZURE_SEARCH_INDEX = os.environ.get("AZURE_SEARCH_INDEX", "confluence-vector-index")
+AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
+AZURE_OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
+EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBED_DEPLOYMENT"]
+CHAT_DEPLOYMENT = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT")
+STATE_FILE = os.environ.get("STATE_FILE", "/data/confluence_ingest_state.json")
+CHUNK_MAX_CHARS = int(os.environ.get("CHUNK_MAX_CHARS", "3000"))
+CHUNK_OVERLAP_CHARS = int(os.environ.get("CHUNK_OVERLAP_CHARS", "400"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "32"))
 
-# ----- Basic validation -----
-for name, val in [
-    ("CONFLUENCE_BASE", CONFLUENCE_BASE),
-    ("CONFLUENCE_USER", CONFLUENCE_USER),
-    ("CONFLUENCE_API_TOKEN", CONFLUENCE_API_TOKEN),
-    ("SPACE_KEY", SPACE_KEY),
-    ("AZURE_SEARCH_ENDPOINT", AZURE_SEARCH_ENDPOINT),
-    ("AZURE_SEARCH_KEY", AZURE_SEARCH_KEY),
-    ("AZURE_OPENAI_ENDPOINT", AZURE_OPENAI_ENDPOINT),
-    ("AZURE_OPENAI_KEY", AZURE_OPENAI_KEY),
-    ("EMBED_DEPLOYMENT", EMBED_DEPLOYMENT)
-]:
-    if not val:
-        raise RuntimeError(f"Missing required env var: {name}")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Configure Azure OpenAI client
+# ============ AZURE CLIENTS ============
+
 client = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
     api_version="2023-05-15",
     azure_endpoint=AZURE_OPENAI_ENDPOINT
 )
 
-def load_state() -> Dict[str, Any]:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    return {"indexed_pages": {}, "last_run": None, "index_initialized": False}
-
-def save_state(state: Dict[str, Any]):
-    with open(STATE_FILE, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2)
-
-def chunk_text(text: str, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP_CHARS) -> List[str]:
-    if overlap >= max_chars:
-        raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_MAX_CHARS")
-    chunks = []
-    n = len(text)
-    i = 0
-    while i < n:
-        end = min(i + max_chars, n)
-        chunks.append(text[i:end])
-        i += max_chars - overlap
-    return [c for c in chunks if c]
-
 def embed_texts(texts: List[str]) -> List[List[float]]:
     try:
         resp = client.embeddings.create(model=EMBED_DEPLOYMENT, input=texts)
         return [d.embedding for d in resp.data]
     except Exception as e:
-        logging.error(f"Embedding failed for batch of size {len(texts)}: {e}")
+        logger.error(f"Embedding failed: {e}")
         return [[0.0] * 1536 for _ in texts]
 
-def fix_confluence_url(base_url: str, webui_path: str, space_key: str, page_id: str) -> str:
-    """
-    Ensure Confluence URL includes /wiki/ in the path.
-    Handles various Confluence URL formats.
-    """
-    base = base_url.rstrip('/')
-    
-    if webui_path:
-        # If webui path is provided (e.g., "/spaces/SPACEKEY/pages/12345/PageTitle")
-        if webui_path.startswith("/"):
-            # Check if /wiki is missing and path starts with /spaces
-            if "/wiki" not in base and webui_path.startswith("/spaces"):
-                return f"{base}/wiki{webui_path}"
-            else:
-                return f"{base}{webui_path}"
-        else:
-            return urljoin(base, webui_path)
-    else:
-        # Fallback: construct URL manually
-        if "/wiki" in base:
-            return f"{base}/spaces/{space_key}/pages/{page_id}"
-        else:
-            return f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+# ============ STATE HANDLING ============
 
-# ----- Azure Search index management -----
-def list_indexes() -> List[str]:
-    idx_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=AzureKeyCredential(AZURE_SEARCH_KEY))
-    return [n for n in idx_client.list_index_names()]
+def load_state() -> Dict[str, Any]:
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as fh:
+            logger.info(f"Loaded ingest state from {STATE_FILE}")
+            return json.load(fh)
+    logger.info(f"No ingest state found, creating new state at: {STATE_FILE}")
+    return {"indexed_pages": {}, "last_run": None, "index_initialized": False}
+
+def save_state(state: Dict[str, Any]):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+    logger.info(f"State saved to {STATE_FILE}")
+
+# ============ AZURE SEARCH INDEX MGMT ============
 
 def ensure_index_exists():
     idx_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=AzureKeyCredential(AZURE_SEARCH_KEY))
     existing = [n for n in idx_client.list_index_names()]
     if AZURE_SEARCH_INDEX in existing:
-        print("Index exists:", AZURE_SEARCH_INDEX)
+        logger.info(f"Index exists: {AZURE_SEARCH_INDEX}")
         return
 
-    # Determine vector dim from a sample embed
     sample_dim = len(embed_texts(["hello world"])[0])
-    print("Creating index with vector dim:", sample_dim)
+    logger.info(f"Creating index with vector dim: {sample_dim}")
 
-    # Configure vector search
     vector_search = VectorSearch(
         profiles=[VectorSearchProfile(name="my-vector-profile", algorithm_configuration_name="my-hnsw")],
         algorithms=[HnswAlgorithmConfiguration(name="my-hnsw")]
@@ -161,7 +103,6 @@ def ensure_index_exists():
         SimpleField(name="space", type=SearchFieldDataType.String, filterable=True, sortable=True),
         SimpleField(name="labels", type=SearchFieldDataType.Collection(SearchFieldDataType.String), filterable=True),
         SimpleField(name="has_video", type=SearchFieldDataType.Boolean, filterable=True),
-        # Use SearchField for vector
         SearchField(
             name="vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -173,11 +114,14 @@ def ensure_index_exists():
 
     index = SearchIndex(name=AZURE_SEARCH_INDEX, fields=fields, vector_search=vector_search)
     idx_client.create_index(index)
-    print("Index created:", AZURE_SEARCH_INDEX)
+    logger.info(f"Index created: {AZURE_SEARCH_INDEX}")
 
-# ----- Index client helpers -----
 def get_doc_client() -> SearchClient:
-    return SearchClient(endpoint=AZURE_SEARCH_ENDPOINT, index_name=AZURE_SEARCH_INDEX, credential=AzureKeyCredential(AZURE_SEARCH_KEY))
+    return SearchClient(
+        endpoint=AZURE_SEARCH_ENDPOINT,
+        index_name=AZURE_SEARCH_INDEX,
+        credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+    )
 
 def upsert_documents(docs: List[Dict[str, Any]]):
     if not docs:
@@ -186,7 +130,7 @@ def upsert_documents(docs: List[Dict[str, Any]]):
     for i in range(0, len(docs), BATCH_SIZE):
         batch = docs[i:i+BATCH_SIZE]
         doc_client.upload_documents(documents=batch)
-        print(f"Uploaded batch {i//BATCH_SIZE + 1} size {len(batch)}")
+        logger.info(f"Uploaded batch {i//BATCH_SIZE + 1} size {len(batch)}")
 
 def delete_docs_by_page_id(page_id: str):
     doc_client = get_doc_client()
@@ -198,7 +142,21 @@ def delete_docs_by_page_id(page_id: str):
         batch_ids = ids[i:i+BATCH_SIZE]
         actions = [{"@search.action": "delete", "id": id_} for id_ in batch_ids]
         doc_client.index_documents(actions)
-        print(f"Deleted {len(batch_ids)} docs for page {page_id}")
+        logger.info(f"Deleted {len(batch_ids)} docs for page {page_id}")
+
+# ============ CONFLUENCE HELPERS ============
+
+def chunk_text(text: str, max_chars=CHUNK_MAX_CHARS, overlap=CHUNK_OVERLAP_CHARS) -> List[str]:
+    if overlap >= max_chars:
+        raise ValueError("CHUNK_OVERLAP_CHARS must be less than CHUNK_MAX_CHARS")
+    chunks = []
+    n = len(text)
+    i = 0
+    while i < n:
+        end = min(i + max_chars, n)
+        chunks.append(text[i:end])
+        i += max_chars - overlap
+    return [c for c in chunks if c]
 
 def list_space_pages(space_key: str, start=0, limit=50):
     """Fetch pages from Confluence space"""
@@ -231,7 +189,6 @@ def convert_storage_to_text(storage_html: str) -> str:
 
 def has_video_content(storage_html: str) -> bool:
     """Detect if page contains video content"""
-    # Confluence video patterns
     video_patterns = [
         r'<ac:structured-macro[^>]*ac:name=["\']multimedia["\']',
         r'<ac:structured-macro[^>]*ac:name=["\']widget["\']',
@@ -245,19 +202,36 @@ def has_video_content(storage_html: str) -> bool:
         r'vimeo\.com',
         r'youtu\.be'
     ]
-    
     for pattern in video_patterns:
         if re.search(pattern, storage_html, re.IGNORECASE):
             return True
     return False
 
-# ----- Main ingest logic -----
+def fix_confluence_url(base_url: str, webui_path: str, space_key: str, page_id: str) -> str:
+    base = base_url.rstrip('/')
+    if webui_path:
+        if webui_path.startswith("/"):
+            if "/wiki" not in base and webui_path.startswith("/spaces"):
+                return f"{base}/wiki{webui_path}"
+            else:
+                return f"{base}{webui_path}"
+        else:
+            return urljoin(base, webui_path)
+    else:
+        if "/wiki" in base:
+            return f"{base}/spaces/{space_key}/pages/{page_id}"
+        else:
+            return f"{base}/wiki/spaces/{space_key}/pages/{page_id}"
+
+# ============ MAIN INGEST LOGIC ============
+
 def run_ingest():
+    logger.info("Starting Confluence ingestion process")
     state = load_state()
     ensure_index_exists()
     state["index_initialized"] = True
 
-    # list pages
+    # Fetch all pages
     pages = []
     start = 0
     limit = 50
@@ -271,19 +245,19 @@ def run_ingest():
             break
         start += limit
 
-    print("Pages found:", len(pages))
+    logger.info(f"Pages found: {len(pages)}")
     current_versions = {p["id"]: p["version"]["number"] for p in pages}
 
-    # detect deletions
+    # Detect deletions
     previously_indexed = state.get("indexed_pages", {})
     deleted = [pid for pid in previously_indexed.keys() if pid not in current_versions]
     if deleted:
-        print("Deleted pages detected:", deleted)
+        logger.info(f"Deleted pages detected: {deleted}")
         for pid in deleted:
             delete_docs_by_page_id(pid)
             state["indexed_pages"].pop(pid, None)
 
-    # detect new or changed pages
+    # Detect new or changed pages
     to_update = []
     for p in pages:
         pid = p["id"]
@@ -291,61 +265,61 @@ def run_ingest():
         if pid not in previously_indexed or previously_indexed.get(pid) != ver:
             to_update.append(pid)
 
-    print("Pages to update (new/changed):", len(to_update))
-
+    logger.info(f"Pages to update (new/changed): {len(to_update)}")
     all_docs = []
     for pid in to_update:
-        page = fetch_page(pid)
-        title = page.get("title", "")
-        
-        # FIXED: Get webui link and construct proper URL with /wiki/
-        links = page.get("_links", {})
-        webui = links.get("webui", "")
-        url = fix_confluence_url(CONFLUENCE_BASE, webui, SPACE_KEY, pid)
-
-        storage = page.get("body", {}).get("storage", {}).get("value", "")
-        text = convert_storage_to_text(storage)
-        has_video = has_video_content(storage)
-
-        chunks = chunk_text(text)
-        labels = []
-        if page.get("metadata", {}).get("labels"):
-            labels = [l.get("name") for l in page["metadata"]["labels"].get("results", [])]
-
-        last_modified = page.get("version", {}).get("when")
-        version_num = page.get("version", {}).get("number", 1)
-
-        # embeddings in batches
-        for i in range(0, len(chunks), BATCH_SIZE):
-            batch_chunks = chunks[i:i+BATCH_SIZE]
-            embeddings = embed_texts(batch_chunks)
-            for j, ch in enumerate(batch_chunks):
-                idx = i + j
-                doc = {
-                    "id": f"{pid}_{idx}",
-                    "page_id": pid,
-                    "title": title,
-                    "content": ch,
-                    "url": url,  # Fixed URL with /wiki/
-                    "last_modified": last_modified,
-                    "version": version_num,
-                    "space": SPACE_KEY,
-                    "labels": labels,
-                    "has_video": has_video,
-                    "vector": embeddings[j]
-                }
-                all_docs.append(doc)
+        try:
+            page = fetch_page(pid)
+            title = page.get("title", "")
+            links = page.get("_links", {})
+            webui = links.get("webui", "")
+            url = fix_confluence_url(CONFLUENCE_BASE, webui, SPACE_KEY, pid)
+            storage = page.get("body", {}).get("storage", {}).get("value", "")
+            text = convert_storage_to_text(storage)
+            has_video = has_video_content(storage)
+            chunks = chunk_text(text)
+            labels = []
+            if page.get("metadata", {}).get("labels"):
+                labels = [l.get("name") for l in page["metadata"]["labels"].get("results", [])]
+            last_modified = page.get("version", {}).get("when")
+            version_num = page.get("version", {}).get("number", 1)
+            for i in range(0, len(chunks), BATCH_SIZE):
+                batch_chunks = chunks[i:i+BATCH_SIZE]
+                embeddings = embed_texts(batch_chunks)
+                for j, ch in enumerate(batch_chunks):
+                    idx = i + j
+                    doc = {
+                        "id": f"{pid}_{idx}",
+                        "page_id": pid,
+                        "title": title,
+                        "content": ch,
+                        "url": url,
+                        "last_modified": last_modified,
+                        "version": version_num,
+                        "space": SPACE_KEY,
+                        "labels": labels,
+                        "has_video": has_video,
+                        "vector": embeddings[j]
+                    }
+                    all_docs.append(doc)
+            logger.info(f"Processed page: {title} ({pid})")
+        except Exception as e:
+            logger.error(f"Error processing page {pid}: {e}")
+            continue
 
     if all_docs:
         upsert_documents(all_docs)
 
-    # update state
     for pid in to_update:
         state["indexed_pages"][pid] = current_versions.get(pid)
 
     state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     save_state(state)
-    print("Ingest complete. Indexed docs:", len(all_docs))
+    logger.info(f"Ingestion complete. Total docs indexed: {len(all_docs)}")
 
 if __name__ == "__main__":
-    run_ingest()
+    try:
+        run_ingest()
+    except Exception as e:
+        logger.error(f"Ingestion failed: {e}", exc_info=True)
+        raise

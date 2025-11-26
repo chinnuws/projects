@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: confluence-kb-config
+  namespace: confluence-kb
+data:
+  STATE_FILE: "/data/confluence_ingest_state.json"
+  AZURE_SEARCH_INDEX: "confluence-vector-index"
+  CHUNK_MAX_CHARS: "3000"
+  CHUNK_OVERLAP_CHARS: "400"
+  BATCH_SIZE: "32"
