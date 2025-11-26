@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kb-ingest-state-pvc
+  namespace: confluence-kb
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: default      # "azurefile" or your class for AKS
+  resources:
+    requests:
+      storage: 1Gi
