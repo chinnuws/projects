@@ -1,20 +1,21 @@
 """
 confluence_ingest_refactored.py
 
-High-quality Confluence → Azure AI Search ingestion
-Compatible with azure-search-documents 11.6.x
-Semantic reranker enabled (dict-based config)
+Confluence → Azure AI Search ingestion
+- Semantic reranker enabled (SDK-safe)
+- Vector search enabled
+- SSL verification using custom Confluence CA cert
 """
 
 import os
 import re
 import json
-import time
 import logging
 from typing import List
 from html import unescape
-from dotenv import load_dotenv
+
 import requests
+from dotenv import load_dotenv
 
 # Azure Search
 from azure.core.credentials import AzureKeyCredential
@@ -41,24 +42,35 @@ from openai import AzureOpenAI
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
+# Confluence
 CONFLUENCE_BASE = os.getenv("CONFLUENCE_BASE")
 CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
 SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
+CONFLUENCE_CA_CERT = os.getenv("CONFLUENCE_CA_CERT")  # <-- SSL CERT
 
+# Azure Search
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-rag-v2")
 
+# Azure OpenAI
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
 
+# Ingestion tuning
 STATE_FILE = "./ingest_state.json"
-
 CHUNK_MAX_CHARS = 1800
 CHUNK_OVERLAP_CHARS = 200
 BATCH_SIZE = 16
+
+# --------------------------------------------------
+# VALIDATION
+# --------------------------------------------------
+
+if CONFLUENCE_CA_CERT and not os.path.exists(CONFLUENCE_CA_CERT):
+    raise RuntimeError(f"Confluence CA cert not found: {CONFLUENCE_CA_CERT}")
 
 # --------------------------------------------------
 # CLIENTS
@@ -94,7 +106,7 @@ def save_state(state):
     json.dump(state, open(STATE_FILE, "w"), indent=2)
 
 # --------------------------------------------------
-# CONFLUENCE
+# CONFLUENCE API
 # --------------------------------------------------
 
 def list_pages(start=0, limit=50):
@@ -106,14 +118,24 @@ def list_pages(start=0, limit=50):
         "start": start,
         "expand": "version",
     }
-    r = requests.get(url, params=params, auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN))
+    r = requests.get(
+        url,
+        params=params,
+        auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
+        verify=CONFLUENCE_CA_CERT,
+    )
     r.raise_for_status()
     return r.json()
 
 def fetch_page(page_id: str):
     url = f"{CONFLUENCE_BASE}/rest/api/content/{page_id}"
     params = {"expand": "body.storage,version,metadata.labels,links.webui"}
-    r = requests.get(url, params=params, auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN))
+    r = requests.get(
+        url,
+        params=params,
+        auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
+        verify=CONFLUENCE_CA_CERT,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -250,11 +272,10 @@ def run():
         page = fetch_page(pid)
         title = page["title"]
         html = page["body"]["storage"]["value"]
+        url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
 
         text = html_to_text(html)
         chunks = smart_chunk(text)
-
-        url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
 
         contextual_chunks = [
             f"Confluence Space: {SPACE_KEY}\nPage Title: {title}\nContent:\n{c}"
