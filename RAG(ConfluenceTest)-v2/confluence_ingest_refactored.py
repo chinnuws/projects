@@ -1,15 +1,7 @@
-"""
-confluence_ingest_refactored.py
-
-Confluence → Azure AI Search ingestion
-- Semantic reranker enabled (SDK-safe)
-- Vector search enabled
-- SSL verification using custom Confluence CA cert
-"""
-
 import os
 import re
 import json
+import time
 import logging
 from typing import List
 from html import unescape
@@ -17,7 +9,6 @@ from html import unescape
 import requests
 from dotenv import load_dotenv
 
-# Azure Search
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -32,45 +23,42 @@ from azure.search.documents.indexes.models import (
     VectorSearchProfile,
 )
 
-# Azure OpenAI
-from openai import AzureOpenAI
+from openai import AzureOpenAI, RateLimitError, BadRequestError
 
 # --------------------------------------------------
 # ENV
 # --------------------------------------------------
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 
-# Confluence
 CONFLUENCE_BASE = os.getenv("CONFLUENCE_BASE")
 CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
 SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
-CONFLUENCE_CA_CERT = os.getenv("CONFLUENCE_CA_CERT")  # <-- SSL CERT
+CONFLUENCE_CA_CERT = os.getenv("CONFLUENCE_CA_CERT")
 
-# Azure Search
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-rag-v2")
 
-# Azure OpenAI
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
 
-# Ingestion tuning
 STATE_FILE = "./ingest_state.json"
+
 CHUNK_MAX_CHARS = 1800
 CHUNK_OVERLAP_CHARS = 200
 BATCH_SIZE = 16
+MAX_EMBED_RETRIES = 5
 
 # --------------------------------------------------
 # VALIDATION
 # --------------------------------------------------
 
 if CONFLUENCE_CA_CERT and not os.path.exists(CONFLUENCE_CA_CERT):
-    raise RuntimeError(f"Confluence CA cert not found: {CONFLUENCE_CA_CERT}")
+    raise RuntimeError(f"Missing Confluence CA cert: {CONFLUENCE_CA_CERT}")
 
 # --------------------------------------------------
 # CLIENTS
@@ -78,8 +66,8 @@ if CONFLUENCE_CA_CERT and not os.path.exists(CONFLUENCE_CA_CERT):
 
 aoai = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
-    api_version="2023-05-15",
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version="2023-05-15",
 )
 
 index_client = SearchIndexClient(
@@ -129,7 +117,7 @@ def list_pages(start=0, limit=50):
 
 def fetch_page(page_id: str):
     url = f"{CONFLUENCE_BASE}/rest/api/content/{page_id}"
-    params = {"expand": "body.storage,version,metadata.labels,links.webui"}
+    params = {"expand": "body.storage,version,links.webui"}
     r = requests.get(
         url,
         params=params,
@@ -144,15 +132,15 @@ def fetch_page(page_id: str):
 # --------------------------------------------------
 
 def html_to_text(html: str) -> str:
-    html = re.sub(r"<h1[^>]*>(.*?)</h1>", r"\n# \1\n", html)
-    html = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n## \1\n", html)
-    html = re.sub(r"<h3[^>]*>(.*?)</h3>", r"\n### \1\n", html)
+    html = re.sub(
+        r"<table.*?>.*?</table>",
+        lambda m: "\nTABLE:\n" + re.sub(r"<[^>]+>", " ", m.group()) + "\n",
+        html,
+        flags=re.S,
+    )
 
+    html = re.sub(r"<h[1-6][^>]*>(.*?)</h[1-6]>", r"\n# \1\n", html)
     html = re.sub(r"<li[^>]*>(.*?)</li>", r"\n- \1", html)
-
-    html = re.sub(r"<tr[^>]*>(.*?)</tr>", r"\n\1", html)
-    html = re.sub(r"<th[^>]*>(.*?)</th>", r" \1 |", html)
-    html = re.sub(r"<td[^>]*>(.*?)</td>", r" \1 |", html)
 
     text = re.sub(r"<[^>]+>", " ", html)
     text = unescape(text)
@@ -160,24 +148,15 @@ def html_to_text(html: str) -> str:
 
     return text.strip()
 
-def smart_chunk(text: str) -> List[str]:
-    sections = re.split(r"\n#{1,3}\s+", text)
+def chunk_text(text: str) -> List[str]:
     chunks = []
-
-    for sec in sections:
-        sec = sec.strip()
-        if not sec:
-            continue
-
-        if len(sec) <= CHUNK_MAX_CHARS:
-            chunks.append(sec)
-        else:
-            i = 0
-            while i < len(sec):
-                end = min(i + CHUNK_MAX_CHARS, len(sec))
-                chunks.append(sec[i:end])
-                i += CHUNK_MAX_CHARS - CHUNK_OVERLAP_CHARS
-
+    i = 0
+    while i < len(text):
+        end = min(i + CHUNK_MAX_CHARS, len(text))
+        chunk = text[i:end].strip()
+        if len(chunk) > 20:
+            chunks.append(chunk)
+        i += CHUNK_MAX_CHARS - CHUNK_OVERLAP_CHARS
     return chunks
 
 # --------------------------------------------------
@@ -185,22 +164,32 @@ def smart_chunk(text: str) -> List[str]:
 # --------------------------------------------------
 
 def embed(texts: List[str]) -> List[List[float]]:
-    resp = aoai.embeddings.create(
-        model=EMBED_DEPLOYMENT,
-        input=texts,
-    )
-    return [r.embedding for r in resp.data]
+    texts = [t for t in texts if t and t.strip()]
+    if not texts:
+        return []
+
+    for attempt in range(1, MAX_EMBED_RETRIES + 1):
+        try:
+            resp = aoai.embeddings.create(
+                model=EMBED_DEPLOYMENT,
+                input=texts,
+            )
+            return [r.embedding for r in resp.data]
+
+        except (RateLimitError, BadRequestError):
+            time.sleep(2 ** attempt)
+
+    return []
 
 # --------------------------------------------------
-# INDEX CREATION (SDK-SAFE)
+# INDEX
 # --------------------------------------------------
 
 def ensure_index():
     if AZURE_SEARCH_INDEX in index_client.list_index_names():
-        logging.info("Search index exists")
         return
 
-    dim = len(embed(["hello world"])[0])
+    dim = len(embed(["hello"])[0])
 
     vector_search = VectorSearch(
         algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
@@ -242,71 +231,70 @@ def ensure_index():
     )
 
     index_client.create_index(index)
-    logging.info("Created index with semantic reranker enabled")
 
 # --------------------------------------------------
-# INGEST
+# RUN
 # --------------------------------------------------
 
 def run():
     ensure_index()
     state = load_state()
 
-    pages = []
     start = 0
     while True:
         batch = list_pages(start=start)
-        results = batch.get("results", [])
-        if not results:
+        pages = batch.get("results", [])
+        if not pages:
             break
-        pages.extend(results)
-        start += len(results)
+        start += len(pages)
 
-    for p in pages:
-        pid = p["id"]
-        version = p["version"]["number"]
+        for p in pages:
+            pid = p["id"]
+            version = p["version"]["number"]
 
-        if state["indexed_pages"].get(pid) == version:
-            continue
+            if state["indexed_pages"].get(pid) == version:
+                continue
 
-        page = fetch_page(pid)
-        title = page["title"]
-        html = page["body"]["storage"]["value"]
-        url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
+            page = fetch_page(pid)
+            title = page["title"]
+            url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
 
-        text = html_to_text(html)
-        chunks = smart_chunk(text)
+            text = html_to_text(page["body"]["storage"]["value"])
+            chunks = chunk_text(text)
 
-        contextual_chunks = [
-            f"Confluence Space: {SPACE_KEY}\nPage Title: {title}\nContent:\n{c}"
-            for c in chunks
-        ]
+            if not chunks:
+                continue
 
-        embeddings = embed(contextual_chunks)
+            contextual = [
+                f"Space: {SPACE_KEY}\nTitle: {title}\nContent:\n{c}"
+                for c in chunks
+            ]
 
-        docs = []
-        for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
-            docs.append({
-                "id": f"{pid}_{i}",
-                "page_id": pid,
-                "title": title,
-                "content": chunk,
-                "url": url,
-                "space": SPACE_KEY,
-                "version": version,
-                "vector": vec,
-            })
+            vectors = embed(contextual)
+            if not vectors:
+                continue
 
-        for i in range(0, len(docs), BATCH_SIZE):
-            doc_client.upload_documents(docs[i:i + BATCH_SIZE])
+            docs = []
+            for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+                docs.append({
+                    "id": f"{pid}_{i}",
+                    "page_id": pid,
+                    "title": title,
+                    "content": chunk,
+                    "url": url,
+                    "space": SPACE_KEY,
+                    "version": version,
+                    "vector": vec,
+                })
 
-        state["indexed_pages"][pid] = version
-        logging.info(f"Indexed: {title}")
+            for i in range(0, len(docs), BATCH_SIZE):
+                doc_client.upload_documents(docs[i:i + BATCH_SIZE])
+
+            state["indexed_pages"][pid] = version
+            logging.info(f"Indexed: {title}")
 
     save_state(state)
-    logging.info("Ingestion complete")
-
-# --------------------------------------------------
+    logging.info("Ingestion completed")
 
 if __name__ == "__main__":
     run()
