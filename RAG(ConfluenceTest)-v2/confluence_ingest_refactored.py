@@ -2,7 +2,8 @@
 confluence_ingest_refactored.py
 
 High-quality Confluence → Azure AI Search ingestion
-Optimized for RAG (semantic search + vector embeddings)
+Compatible with azure-search-documents 11.6.x
+Semantic reranker enabled (dict-based config)
 """
 
 import os
@@ -10,12 +11,12 @@ import re
 import json
 import time
 import logging
-from typing import List, Dict
+from typing import List
 from html import unescape
 from dotenv import load_dotenv
 import requests
 
-# Azure
+# Azure Search
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -28,17 +29,14 @@ from azure.search.documents.indexes.models import (
     VectorSearch,
     HnswAlgorithmConfiguration,
     VectorSearchProfile,
-    SemanticConfiguration,
-    SemanticSettings,
-    SemanticField,
 )
 
 # Azure OpenAI
 from openai import AzureOpenAI
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # ENV
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +48,7 @@ SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
 
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
-AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-rag-index")
+AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-rag-v2")
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
@@ -58,13 +56,13 @@ EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
 
 STATE_FILE = "./ingest_state.json"
 
-CHUNK_MAX_CHARS = 3000
-CHUNK_OVERLAP_CHARS = 400
-BATCH_SIZE = 32
+CHUNK_MAX_CHARS = 1800
+CHUNK_OVERLAP_CHARS = 200
+BATCH_SIZE = 16
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # CLIENTS
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 aoai = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
@@ -83,24 +81,23 @@ doc_client = SearchClient(
     AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # STATE
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 def load_state():
     if os.path.exists(STATE_FILE):
         return json.load(open(STATE_FILE))
     return {"indexed_pages": {}}
 
-
 def save_state(state):
     json.dump(state, open(STATE_FILE, "w"), indent=2)
 
-# ------------------------------------------------------------------
-# CONFLUENCE HELPERS
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# CONFLUENCE
+# --------------------------------------------------
 
-def fetch_pages(start=0, limit=50):
+def list_pages(start=0, limit=50):
     url = f"{CONFLUENCE_BASE}/rest/api/content"
     params = {
         "spaceKey": SPACE_KEY,
@@ -113,7 +110,6 @@ def fetch_pages(start=0, limit=50):
     r.raise_for_status()
     return r.json()
 
-
 def fetch_page(page_id: str):
     url = f"{CONFLUENCE_BASE}/rest/api/content/{page_id}"
     params = {"expand": "body.storage,version,metadata.labels,links.webui"}
@@ -121,20 +117,17 @@ def fetch_page(page_id: str):
     r.raise_for_status()
     return r.json()
 
-# ------------------------------------------------------------------
-# TEXT PROCESSING (CRITICAL)
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# TEXT PROCESSING
+# --------------------------------------------------
 
 def html_to_text(html: str) -> str:
-    # Headings
     html = re.sub(r"<h1[^>]*>(.*?)</h1>", r"\n# \1\n", html)
     html = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n## \1\n", html)
     html = re.sub(r"<h3[^>]*>(.*?)</h3>", r"\n### \1\n", html)
 
-    # Lists
     html = re.sub(r"<li[^>]*>(.*?)</li>", r"\n- \1", html)
 
-    # Tables → readable rows
     html = re.sub(r"<tr[^>]*>(.*?)</tr>", r"\n\1", html)
     html = re.sub(r"<th[^>]*>(.*?)</th>", r" \1 |", html)
     html = re.sub(r"<td[^>]*>(.*?)</td>", r" \1 |", html)
@@ -144,7 +137,6 @@ def html_to_text(html: str) -> str:
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
-
 
 def smart_chunk(text: str) -> List[str]:
     sections = re.split(r"\n#{1,3}\s+", text)
@@ -166,9 +158,9 @@ def smart_chunk(text: str) -> List[str]:
 
     return chunks
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # EMBEDDINGS
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 def embed(texts: List[str]) -> List[List[float]]:
     resp = aoai.embeddings.create(
@@ -177,29 +169,32 @@ def embed(texts: List[str]) -> List[List[float]]:
     )
     return [r.embedding for r in resp.data]
 
-# ------------------------------------------------------------------
-# SEARCH INDEX
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# INDEX CREATION (SDK-SAFE)
+# --------------------------------------------------
 
 def ensure_index():
     if AZURE_SEARCH_INDEX in index_client.list_index_names():
         logging.info("Search index exists")
         return
 
-    dim = len(embed(["hello"])[0])
+    dim = len(embed(["hello world"])[0])
 
     vector_search = VectorSearch(
         algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
-        profiles=[VectorSearchProfile(name="vector-profile", algorithm_configuration_name="hnsw")],
+        profiles=[VectorSearchProfile(
+            name="vector-profile",
+            algorithm_configuration_name="hnsw",
+        )],
     )
 
-    semantic_config = SemanticConfiguration(
-        name="default",
-        prioritized_fields={
-            "title_field": SemanticField(field_name="title"),
-            "content_fields": [SemanticField(field_name="content")],
+    semantic_config = {
+        "name": "default",
+        "prioritizedFields": {
+            "titleField": {"fieldName": "title"},
+            "contentFields": [{"fieldName": "content"}],
         },
-    )
+    }
 
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
@@ -221,15 +216,15 @@ def ensure_index():
         name=AZURE_SEARCH_INDEX,
         fields=fields,
         vector_search=vector_search,
-        semantic_settings=SemanticSettings(configurations=[semantic_config]),
+        semantic_configurations=[semantic_config],
     )
 
     index_client.create_index(index)
-    logging.info("Created search index")
+    logging.info("Created index with semantic reranker enabled")
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 # INGEST
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 def run():
     ensure_index()
@@ -238,7 +233,7 @@ def run():
     pages = []
     start = 0
     while True:
-        batch = fetch_pages(start=start)
+        batch = list_pages(start=start)
         results = batch.get("results", [])
         if not results:
             break
@@ -255,13 +250,12 @@ def run():
         page = fetch_page(pid)
         title = page["title"]
         html = page["body"]["storage"]["value"]
+
         text = html_to_text(html)
         chunks = smart_chunk(text)
 
         url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
-        labels = [l["name"] for l in page.get("metadata", {}).get("labels", {}).get("results", [])]
 
-        docs = []
         contextual_chunks = [
             f"Confluence Space: {SPACE_KEY}\nPage Title: {title}\nContent:\n{c}"
             for c in chunks
@@ -269,6 +263,7 @@ def run():
 
         embeddings = embed(contextual_chunks)
 
+        docs = []
         for i, (chunk, vec) in enumerate(zip(chunks, embeddings)):
             docs.append({
                 "id": f"{pid}_{i}",
@@ -290,7 +285,7 @@ def run():
     save_state(state)
     logging.info("Ingestion complete")
 
-# ------------------------------------------------------------------
+# --------------------------------------------------
 
 if __name__ == "__main__":
     run()
