@@ -17,8 +17,30 @@ from azure.core.credentials import AzureKeyCredential
 from openai import AzureOpenAI
 
 # ============================================================
-# Configuration (ALL casted safely)
+# Configuration (validated & casted)
 # ============================================================
+
+required_envs = [
+    "CONFLUENCE_BASE_URL",
+    "CONFLUENCE_USERNAME",
+    "CONFLUENCE_API_TOKEN",
+    "CONFLUENCE_SPACE_KEY",
+    "AZURE_SEARCH_ENDPOINT",
+    "AZURE_SEARCH_KEY",
+    "AZURE_SEARCH_INDEX",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_KEY",
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+]
+
+for env in required_envs:
+    if not os.getenv(env):
+        raise RuntimeError(f"❌ Missing required environment variable: {env}")
+
+CONFLUENCE_BASE_URL = os.environ["CONFLUENCE_BASE_URL"].rstrip("/")
+CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
+CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
+CONFLUENCE_SPACE_KEY = os.environ["CONFLUENCE_SPACE_KEY"]
 
 SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
@@ -28,19 +50,14 @@ AOAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 AOAI_KEY = os.environ["AZURE_OPENAI_KEY"]
 AOAI_EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"]
 
-CONFLUENCE_BASE_URL = os.environ["CONFLUENCE_BASE_URL"]
-CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
-CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
-
 SSL_CERT_PATH = "confluence.crt"
 STATE_FILE = "confluence_state.json"
 
 CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "3000"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))  # keep low to avoid throttling
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))
 VECTOR_DIMENSIONS = int(os.getenv("VECTOR_DIMENSIONS", "1536"))
-
-MAX_PAGES = 500   # pagination safety
+MAX_PAGES = int(os.getenv("MAX_PAGES", "500"))
 
 # ============================================================
 # Clients
@@ -80,12 +97,11 @@ def save_state(state):
 def chunk_text(text: str) -> List[str]:
     chunks = []
     start = 0
-    text_len = len(text)
+    length = len(text)
 
-    while start < text_len:
+    while start < length:
         end = start + CHUNK_MAX_CHARS
-        chunk = text[start:end]
-        chunks.append(chunk)
+        chunks.append(text[start:end])
         start = end - CHUNK_OVERLAP_CHARS
         if start < 0:
             start = 0
@@ -94,31 +110,30 @@ def chunk_text(text: str) -> List[str]:
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
     vectors = []
-
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        print(f"🧠 Embedding batch {i//BATCH_SIZE + 1} ({len(batch)} chunks)")
-
+        print(f"🧠 Embedding batch {i // BATCH_SIZE + 1} ({len(batch)} chunks)")
         resp = aoai.embeddings.create(
             model=AOAI_EMBED_DEPLOYMENT,
             input=batch,
             timeout=60,
         )
-
         vectors.extend([d.embedding for d in resp.data])
-
     return vectors
 
 # ============================================================
-# Confluence Fetch
+# Confluence Fetch (SPACE-SCOPED)
 # ============================================================
 
 def fetch_pages():
-    print("📥 Fetching pages from Confluence...")
+    print(f"📥 Fetching pages from Confluence space '{CONFLUENCE_SPACE_KEY}'")
+
     url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
     params = {
+        "spaceKey": CONFLUENCE_SPACE_KEY,
         "limit": 50,
         "expand": "body.storage,version",
+        "type": "page",
     }
 
     pages = []
@@ -131,7 +146,6 @@ def fetch_pages():
             break
 
         print(f"➡️ Fetching: {url}")
-
         resp = requests.get(
             url,
             params=params,
@@ -145,19 +159,19 @@ def fetch_pages():
         batch = data.get("results", [])
         pages.extend(batch)
 
-        print(f"📄 Total pages fetched so far: {len(pages)}")
+        print(f"📄 Pages fetched so far: {len(pages)}")
 
         next_link = data.get("_links", {}).get("next")
         if not next_link:
             break
 
         url = CONFLUENCE_BASE_URL + next_link
-        params = None
+        params = None  # next already includes params
 
     return pages
 
 # ============================================================
-# Index (Vector-only, SDK-safe)
+# Index (vector-only, SDK-safe)
 # ============================================================
 
 def ensure_index():
@@ -168,7 +182,7 @@ def ensure_index():
     except Exception:
         pass
 
-    print("🆕 Creating Azure Search index...")
+    print("🆕 Creating Azure Search index")
 
     fields = [
         SearchField(name="id", type=SearchFieldDataType.String, key=True),
@@ -204,16 +218,15 @@ def ensure_index():
     print("✅ Index created")
 
 # ============================================================
-# Main Ingest
+# Main
 # ============================================================
 
 def run():
     print("🚀 Ingestion started")
-
     ensure_index()
+
     state = load_state()
     pages = fetch_pages()
-
     docs_to_upload = []
 
     for page in pages:
@@ -229,8 +242,6 @@ def run():
             continue
 
         chunks = chunk_text(content)
-        print(f"   ↳ {len(chunks)} chunks")
-
         vectors = embed_texts(chunks)
 
         for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
@@ -254,8 +265,6 @@ def run():
 
     save_state(state)
     print("✅ Ingestion complete")
-
-# ============================================================
 
 if __name__ == "__main__":
     run()
