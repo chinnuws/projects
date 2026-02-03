@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import hashlib
 import requests
 from typing import List
@@ -12,14 +11,14 @@ from azure.search.documents.indexes.models import (
     SearchFieldDataType,
     VectorSearch,
     HnswAlgorithmConfiguration,
-    VectorSearchProfile
+    VectorSearchProfile,
 )
 from azure.core.credentials import AzureKeyCredential
 from openai import AzureOpenAI
 
-# =========================
-# Configuration
-# =========================
+# ============================================================
+# Configuration (ALL casted safely)
+# ============================================================
 
 SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
 SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
@@ -33,107 +32,133 @@ CONFLUENCE_BASE_URL = os.environ["CONFLUENCE_BASE_URL"]
 CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
 CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
 
-STATE_FILE = "confluence_state.json"
 SSL_CERT_PATH = "confluence.crt"
+STATE_FILE = "confluence_state.json"
 
-CHUNK_MAX_CHARS = 3000
-CHUNK_OVERLAP_CHARS = 400
-BATCH_SIZE = 32
-VECTOR_DIMENSIONS = 1536   # text-embedding-3-large
+CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "3000"))
+CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))  # keep low to avoid throttling
+VECTOR_DIMENSIONS = int(os.getenv("VECTOR_DIMENSIONS", "1536"))
 
-# =========================
+MAX_PAGES = 500   # pagination safety
+
+# ============================================================
 # Clients
-# =========================
+# ============================================================
 
 aoai = AzureOpenAI(
     api_key=AOAI_KEY,
     azure_endpoint=AOAI_ENDPOINT,
-    api_version="2024-02-15-preview"
+    api_version="2024-02-15-preview",
 )
 
 index_client = SearchIndexClient(
     SEARCH_ENDPOINT,
-    AzureKeyCredential(SEARCH_KEY)
+    AzureKeyCredential(SEARCH_KEY),
 )
 
 search_client = SearchClient(
     SEARCH_ENDPOINT,
     INDEX_NAME,
-    AzureKeyCredential(SEARCH_KEY)
+    AzureKeyCredential(SEARCH_KEY),
 )
 
-# =========================
-# Helpers
-# =========================
+# ============================================================
+# Utilities
+# ============================================================
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
 def chunk_text(text: str) -> List[str]:
     chunks = []
     start = 0
-    while start < len(text):
+    text_len = len(text)
+
+    while start < text_len:
         end = start + CHUNK_MAX_CHARS
         chunk = text[start:end]
         chunks.append(chunk)
         start = end - CHUNK_OVERLAP_CHARS
         if start < 0:
             start = 0
+
     return chunks
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
-    embeddings = []
+    vectors = []
+
     for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i:i + BATCH_SIZE]
+        batch = texts[i : i + BATCH_SIZE]
+        print(f"🧠 Embedding batch {i//BATCH_SIZE + 1} ({len(batch)} chunks)")
+
         resp = aoai.embeddings.create(
             model=AOAI_EMBED_DEPLOYMENT,
-            input=batch
+            input=batch,
+            timeout=60,
         )
-        embeddings.extend([d.embedding for d in resp.data])
-    return embeddings
 
-# =========================
+        vectors.extend([d.embedding for d in resp.data])
+
+    return vectors
+
+# ============================================================
 # Confluence Fetch
-# =========================
+# ============================================================
 
 def fetch_pages():
+    print("📥 Fetching pages from Confluence...")
     url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
     params = {
         "limit": 50,
-        "expand": "body.storage,version"
+        "expand": "body.storage,version",
     }
 
     pages = []
+    page_count = 0
+
     while True:
+        page_count += 1
+        if page_count > MAX_PAGES:
+            print("⚠️ Max page limit reached, stopping pagination")
+            break
+
+        print(f"➡️ Fetching: {url}")
+
         resp = requests.get(
             url,
             params=params,
             auth=(CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN),
-            verify=SSL_CERT_PATH
+            verify=SSL_CERT_PATH,
+            timeout=30,
         )
         resp.raise_for_status()
+
         data = resp.json()
+        batch = data.get("results", [])
+        pages.extend(batch)
 
-        pages.extend(data["results"])
+        print(f"📄 Total pages fetched so far: {len(pages)}")
 
-        if "_links" in data and "next" in data["_links"]:
-            url = CONFLUENCE_BASE_URL + data["_links"]["next"]
-            params = None
-        else:
+        next_link = data.get("_links", {}).get("next")
+        if not next_link:
             break
+
+        url = CONFLUENCE_BASE_URL + next_link
+        params = None
 
     return pages
 
-# =========================
-# Index Creation (NO semantic)
-# =========================
+# ============================================================
+# Index (Vector-only, SDK-safe)
+# ============================================================
 
 def ensure_index():
     try:
@@ -142,6 +167,8 @@ def ensure_index():
         return
     except Exception:
         pass
+
+    print("🆕 Creating Azure Search index...")
 
     fields = [
         SearchField(name="id", type=SearchFieldDataType.String, key=True),
@@ -153,40 +180,40 @@ def ensure_index():
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
             vector_search_dimensions=VECTOR_DIMENSIONS,
-            vector_search_profile_name="vector-profile"
-        )
+            vector_search_profile_name="vector-profile",
+        ),
     ]
 
     vector_search = VectorSearch(
-        algorithms=[
-            HnswAlgorithmConfiguration(name="hnsw")
-        ],
+        algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
         profiles=[
             VectorSearchProfile(
                 name="vector-profile",
-                algorithm_configuration_name="hnsw"
+                algorithm_configuration_name="hnsw",
             )
-        ]
+        ],
     )
 
     index = SearchIndex(
         name=INDEX_NAME,
         fields=fields,
-        vector_search=vector_search
+        vector_search=vector_search,
     )
 
     index_client.create_index(index)
-    print("✅ Index created (no semantic settings)")
+    print("✅ Index created")
 
-# =========================
+# ============================================================
 # Main Ingest
-# =========================
+# ============================================================
 
 def run():
-    ensure_index()
+    print("🚀 Ingestion started")
 
+    ensure_index()
     state = load_state()
     pages = fetch_pages()
+
     docs_to_upload = []
 
     for page in pages:
@@ -195,34 +222,40 @@ def run():
         title = page["title"]
         content = page["body"]["storage"]["value"]
 
-        state_key = f"{page_id}:{version}"
+        print(f"🔹 Processing page {page_id} | v{version}")
+
         if state.get(page_id) == version:
+            print("   ↳ Skipped (unchanged)")
             continue
 
         chunks = chunk_text(content)
-        embeddings = embed_texts(chunks)
+        print(f"   ↳ {len(chunks)} chunks")
 
-        for i, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+        vectors = embed_texts(chunks)
+
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
             doc_id = hashlib.sha1(f"{page_id}-{i}".encode()).hexdigest()
-
             docs_to_upload.append({
                 "id": doc_id,
                 "page_id": page_id,
                 "title": title,
                 "content": chunk,
-                "content_vector": vector
+                "content_vector": vector,
             })
 
         state[page_id] = version
 
-    if docs_to_upload:
-        search_client.upload_documents(docs_to_upload)
-        print(f"✅ Uploaded {len(docs_to_upload)} documents")
+    print(f"📤 Uploading {len(docs_to_upload)} documents")
+
+    for i in range(0, len(docs_to_upload), 500):
+        batch = docs_to_upload[i : i + 500]
+        search_client.upload_documents(batch)
+        print(f"   ↳ Uploaded {i + len(batch)}")
 
     save_state(state)
     print("✅ Ingestion complete")
 
-# =========================
+# ============================================================
 
 if __name__ == "__main__":
     run()
