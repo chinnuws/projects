@@ -1,300 +1,228 @@
 import os
-import re
 import json
 import time
-import logging
-from typing import List
-from html import unescape
-
+import hashlib
 import requests
-from dotenv import load_dotenv
-
-from azure.core.credentials import AzureKeyCredential
+from typing import List
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchIndex,
-    SimpleField,
-    SearchableField,
     SearchField,
     SearchFieldDataType,
     VectorSearch,
     HnswAlgorithmConfiguration,
-    VectorSearchProfile,
+    VectorSearchProfile
 )
+from azure.core.credentials import AzureKeyCredential
+from openai import AzureOpenAI
 
-from openai import AzureOpenAI, RateLimitError, BadRequestError
+# =========================
+# Configuration
+# =========================
 
-# --------------------------------------------------
-# ENV
-# --------------------------------------------------
+SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
+SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
+INDEX_NAME = os.environ["AZURE_SEARCH_INDEX"]
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
+AOAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
+AOAI_KEY = os.environ["AZURE_OPENAI_KEY"]
+AOAI_EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"]
 
-CONFLUENCE_BASE = os.getenv("CONFLUENCE_BASE")
-CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
-CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
-SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
-CONFLUENCE_CA_CERT = os.getenv("CONFLUENCE_CA_CERT")
+CONFLUENCE_BASE_URL = os.environ["CONFLUENCE_BASE_URL"]
+CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
+CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
 
-AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
-AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "confluence-rag-v2")
+STATE_FILE = "confluence_state.json"
+SSL_CERT_PATH = "confluence.crt"
 
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
+CHUNK_MAX_CHARS = 3000
+CHUNK_OVERLAP_CHARS = 400
+BATCH_SIZE = 32
+VECTOR_DIMENSIONS = 1536   # text-embedding-3-large
 
-STATE_FILE = "./ingest_state.json"
-
-CHUNK_MAX_CHARS = 1800
-CHUNK_OVERLAP_CHARS = 200
-BATCH_SIZE = 16
-MAX_EMBED_RETRIES = 5
-
-# --------------------------------------------------
-# VALIDATION
-# --------------------------------------------------
-
-if CONFLUENCE_CA_CERT and not os.path.exists(CONFLUENCE_CA_CERT):
-    raise RuntimeError(f"Missing Confluence CA cert: {CONFLUENCE_CA_CERT}")
-
-# --------------------------------------------------
-# CLIENTS
-# --------------------------------------------------
+# =========================
+# Clients
+# =========================
 
 aoai = AzureOpenAI(
-    api_key=AZURE_OPENAI_KEY,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    api_version="2023-05-15",
+    api_key=AOAI_KEY,
+    azure_endpoint=AOAI_ENDPOINT,
+    api_version="2024-02-15-preview"
 )
 
 index_client = SearchIndexClient(
-    AZURE_SEARCH_ENDPOINT,
-    AzureKeyCredential(AZURE_SEARCH_KEY),
+    SEARCH_ENDPOINT,
+    AzureKeyCredential(SEARCH_KEY)
 )
 
-doc_client = SearchClient(
-    AZURE_SEARCH_ENDPOINT,
-    AZURE_SEARCH_INDEX,
-    AzureKeyCredential(AZURE_SEARCH_KEY),
+search_client = SearchClient(
+    SEARCH_ENDPOINT,
+    INDEX_NAME,
+    AzureKeyCredential(SEARCH_KEY)
 )
 
-# --------------------------------------------------
-# STATE
-# --------------------------------------------------
+# =========================
+# Helpers
+# =========================
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        return json.load(open(STATE_FILE))
-    return {"indexed_pages": {}}
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
 def save_state(state):
-    json.dump(state, open(STATE_FILE, "w"), indent=2)
-
-# --------------------------------------------------
-# CONFLUENCE API
-# --------------------------------------------------
-
-def list_pages(start=0, limit=50):
-    url = f"{CONFLUENCE_BASE}/rest/api/content"
-    params = {
-        "spaceKey": SPACE_KEY,
-        "type": "page",
-        "limit": limit,
-        "start": start,
-        "expand": "version",
-    }
-    r = requests.get(
-        url,
-        params=params,
-        auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
-        verify=CONFLUENCE_CA_CERT,
-    )
-    r.raise_for_status()
-    return r.json()
-
-def fetch_page(page_id: str):
-    url = f"{CONFLUENCE_BASE}/rest/api/content/{page_id}"
-    params = {"expand": "body.storage,version,links.webui"}
-    r = requests.get(
-        url,
-        params=params,
-        auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
-        verify=CONFLUENCE_CA_CERT,
-    )
-    r.raise_for_status()
-    return r.json()
-
-# --------------------------------------------------
-# TEXT PROCESSING
-# --------------------------------------------------
-
-def html_to_text(html: str) -> str:
-    html = re.sub(
-        r"<table.*?>.*?</table>",
-        lambda m: "\nTABLE:\n" + re.sub(r"<[^>]+>", " ", m.group()) + "\n",
-        html,
-        flags=re.S,
-    )
-
-    html = re.sub(r"<h[1-6][^>]*>(.*?)</h[1-6]>", r"\n# \1\n", html)
-    html = re.sub(r"<li[^>]*>(.*?)</li>", r"\n- \1", html)
-
-    text = re.sub(r"<[^>]+>", " ", html)
-    text = unescape(text)
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
 def chunk_text(text: str) -> List[str]:
     chunks = []
-    i = 0
-    while i < len(text):
-        end = min(i + CHUNK_MAX_CHARS, len(text))
-        chunk = text[i:end].strip()
-        if len(chunk) > 20:
-            chunks.append(chunk)
-        i += CHUNK_MAX_CHARS - CHUNK_OVERLAP_CHARS
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_MAX_CHARS
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start = end - CHUNK_OVERLAP_CHARS
+        if start < 0:
+            start = 0
     return chunks
 
-# --------------------------------------------------
-# EMBEDDINGS
-# --------------------------------------------------
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    embeddings = []
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i:i + BATCH_SIZE]
+        resp = aoai.embeddings.create(
+            model=AOAI_EMBED_DEPLOYMENT,
+            input=batch
+        )
+        embeddings.extend([d.embedding for d in resp.data])
+    return embeddings
 
-def embed(texts: List[str]) -> List[List[float]]:
-    texts = [t for t in texts if t and t.strip()]
-    if not texts:
-        return []
+# =========================
+# Confluence Fetch
+# =========================
 
-    for attempt in range(1, MAX_EMBED_RETRIES + 1):
-        try:
-            resp = aoai.embeddings.create(
-                model=EMBED_DEPLOYMENT,
-                input=texts,
-            )
-            return [r.embedding for r in resp.data]
-
-        except (RateLimitError, BadRequestError):
-            time.sleep(2 ** attempt)
-
-    return []
-
-# --------------------------------------------------
-# INDEX
-# --------------------------------------------------
-
-def ensure_index():
-    if AZURE_SEARCH_INDEX in index_client.list_index_names():
-        return
-
-    dim = len(embed(["hello"])[0])
-
-    vector_search = VectorSearch(
-        algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
-        profiles=[VectorSearchProfile(
-            name="vector-profile",
-            algorithm_configuration_name="hnsw",
-        )],
-    )
-
-    semantic_config = {
-        "name": "default",
-        "prioritizedFields": {
-            "titleField": {"fieldName": "title"},
-            "contentFields": [{"fieldName": "content"}],
-        },
+def fetch_pages():
+    url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
+    params = {
+        "limit": 50,
+        "expand": "body.storage,version"
     }
 
+    pages = []
+    while True:
+        resp = requests.get(
+            url,
+            params=params,
+            auth=(CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN),
+            verify=SSL_CERT_PATH
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        pages.extend(data["results"])
+
+        if "_links" in data and "next" in data["_links"]:
+            url = CONFLUENCE_BASE_URL + data["_links"]["next"]
+            params = None
+        else:
+            break
+
+    return pages
+
+# =========================
+# Index Creation (NO semantic)
+# =========================
+
+def ensure_index():
+    try:
+        index_client.get_index(INDEX_NAME)
+        print("ℹ️ Index already exists")
+        return
+    except Exception:
+        pass
+
     fields = [
-        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
-        SimpleField(name="page_id", type=SearchFieldDataType.String, filterable=True),
-        SearchableField(name="title", type=SearchFieldDataType.String),
-        SearchableField(name="content", type=SearchFieldDataType.String),
-        SimpleField(name="url", type=SearchFieldDataType.String),
-        SimpleField(name="space", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="version", type=SearchFieldDataType.Int32),
+        SearchField(name="id", type=SearchFieldDataType.String, key=True),
+        SearchField(name="page_id", type=SearchFieldDataType.String, filterable=True),
+        SearchField(name="title", type=SearchFieldDataType.String, searchable=True),
+        SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
         SearchField(
-            name="vector",
+            name="content_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-            vector_search_dimensions=dim,
-            vector_search_profile_name="vector-profile",
-        ),
+            searchable=True,
+            vector_search_dimensions=VECTOR_DIMENSIONS,
+            vector_search_profile_name="vector-profile"
+        )
     ]
 
+    vector_search = VectorSearch(
+        algorithms=[
+            HnswAlgorithmConfiguration(name="hnsw")
+        ],
+        profiles=[
+            VectorSearchProfile(
+                name="vector-profile",
+                algorithm_configuration_name="hnsw"
+            )
+        ]
+    )
+
     index = SearchIndex(
-        name=AZURE_SEARCH_INDEX,
+        name=INDEX_NAME,
         fields=fields,
-        vector_search=vector_search,
-        semantic_configurations=[semantic_config],
+        vector_search=vector_search
     )
 
     index_client.create_index(index)
+    print("✅ Index created (no semantic settings)")
 
-# --------------------------------------------------
-# RUN
-# --------------------------------------------------
+# =========================
+# Main Ingest
+# =========================
 
 def run():
     ensure_index()
+
     state = load_state()
+    pages = fetch_pages()
+    docs_to_upload = []
 
-    start = 0
-    while True:
-        batch = list_pages(start=start)
-        pages = batch.get("results", [])
-        if not pages:
-            break
-        start += len(pages)
+    for page in pages:
+        page_id = page["id"]
+        version = page["version"]["number"]
+        title = page["title"]
+        content = page["body"]["storage"]["value"]
 
-        for p in pages:
-            pid = p["id"]
-            version = p["version"]["number"]
+        state_key = f"{page_id}:{version}"
+        if state.get(page_id) == version:
+            continue
 
-            if state["indexed_pages"].get(pid) == version:
-                continue
+        chunks = chunk_text(content)
+        embeddings = embed_texts(chunks)
 
-            page = fetch_page(pid)
-            title = page["title"]
-            url = f"{CONFLUENCE_BASE}{page['_links']['webui']}"
+        for i, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+            doc_id = hashlib.sha1(f"{page_id}-{i}".encode()).hexdigest()
 
-            text = html_to_text(page["body"]["storage"]["value"])
-            chunks = chunk_text(text)
+            docs_to_upload.append({
+                "id": doc_id,
+                "page_id": page_id,
+                "title": title,
+                "content": chunk,
+                "content_vector": vector
+            })
 
-            if not chunks:
-                continue
+        state[page_id] = version
 
-            contextual = [
-                f"Space: {SPACE_KEY}\nTitle: {title}\nContent:\n{c}"
-                for c in chunks
-            ]
-
-            vectors = embed(contextual)
-            if not vectors:
-                continue
-
-            docs = []
-            for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
-                docs.append({
-                    "id": f"{pid}_{i}",
-                    "page_id": pid,
-                    "title": title,
-                    "content": chunk,
-                    "url": url,
-                    "space": SPACE_KEY,
-                    "version": version,
-                    "vector": vec,
-                })
-
-            for i in range(0, len(docs), BATCH_SIZE):
-                doc_client.upload_documents(docs[i:i + BATCH_SIZE])
-
-            state["indexed_pages"][pid] = version
-            logging.info(f"Indexed: {title}")
+    if docs_to_upload:
+        search_client.upload_documents(docs_to_upload)
+        print(f"✅ Uploaded {len(docs_to_upload)} documents")
 
     save_state(state)
-    logging.info("Ingestion completed")
+    print("✅ Ingestion complete")
+
+# =========================
 
 if __name__ == "__main__":
     run()
