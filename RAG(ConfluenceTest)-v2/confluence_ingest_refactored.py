@@ -1,270 +1,223 @@
 import os
 import json
-import hashlib
+import time
+import uuid
 import requests
+import logging
 from typing import List
+
+from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchIndex,
+    SimpleField,
     SearchField,
     SearchFieldDataType,
     VectorSearch,
-    HnswAlgorithmConfiguration,
-    VectorSearchProfile,
+    VectorSearchAlgorithmConfiguration,
 )
-from azure.core.credentials import AzureKeyCredential
+
 from openai import AzureOpenAI
+from dotenv import load_dotenv
 
-# ============================================================
-# Configuration (validated & casted)
-# ============================================================
+# --------------------------------------------------
+# Load env
+# --------------------------------------------------
+load_dotenv()
 
-required_envs = [
-    "CONFLUENCE_BASE_URL",
-    "CONFLUENCE_USERNAME",
-    "CONFLUENCE_API_TOKEN",
-    "CONFLUENCE_SPACE_KEY",
-    "AZURE_SEARCH_ENDPOINT",
-    "AZURE_SEARCH_KEY",
-    "AZURE_SEARCH_INDEX",
-    "AZURE_OPENAI_ENDPOINT",
-    "AZURE_OPENAI_KEY",
-    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
-]
+CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
+CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
+CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
+CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
 
-for env in required_envs:
-    if not os.getenv(env):
-        raise RuntimeError(f"❌ Missing required environment variable: {env}")
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
+AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
 
-CONFLUENCE_BASE_URL = os.environ["CONFLUENCE_BASE_URL"].rstrip("/")
-CONFLUENCE_USERNAME = os.environ["CONFLUENCE_USERNAME"]
-CONFLUENCE_API_TOKEN = os.environ["CONFLUENCE_API_TOKEN"]
-CONFLUENCE_SPACE_KEY = os.environ["CONFLUENCE_SPACE_KEY"]
-
-SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
-SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
-INDEX_NAME = os.environ["AZURE_SEARCH_INDEX"]
-
-AOAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
-AOAI_KEY = os.environ["AZURE_OPENAI_KEY"]
-AOAI_EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBEDDING_DEPLOYMENT"]
-
-SSL_CERT_PATH = "confluence.crt"
-STATE_FILE = "confluence_state.json"
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZURE_OPENAI_EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 
 CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "3000"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "8"))
-VECTOR_DIMENSIONS = int(os.getenv("VECTOR_DIMENSIONS", "1536"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "500"))
 
-# ============================================================
+VERIFY_SSL = os.getenv("CONFLUENCE_CA_CERT", True)
+
+# --------------------------------------------------
 # Clients
-# ============================================================
-
-aoai = AzureOpenAI(
-    api_key=AOAI_KEY,
-    azure_endpoint=AOAI_ENDPOINT,
-    api_version="2024-02-15-preview",
+# --------------------------------------------------
+openai_client = AzureOpenAI(
+    api_key=AZURE_OPENAI_KEY,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version=AZURE_OPENAI_API_VERSION,
 )
 
 index_client = SearchIndexClient(
-    SEARCH_ENDPOINT,
-    AzureKeyCredential(SEARCH_KEY),
+    AZURE_SEARCH_ENDPOINT,
+    AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
 search_client = SearchClient(
-    SEARCH_ENDPOINT,
-    INDEX_NAME,
-    AzureKeyCredential(SEARCH_KEY),
+    AZURE_SEARCH_ENDPOINT,
+    AZURE_SEARCH_INDEX,
+    AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
-# ============================================================
-# Utilities
-# ============================================================
+logging.basicConfig(level=logging.INFO)
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
 
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-
+# --------------------------------------------------
+# Helpers
+# --------------------------------------------------
 def chunk_text(text: str) -> List[str]:
     chunks = []
     start = 0
-    length = len(text)
+    text_length = len(text)
 
-    while start < length:
+    while start < text_length:
         end = start + CHUNK_MAX_CHARS
-        chunks.append(text[start:end])
+        chunk = text[start:end]
+        chunks.append(chunk)
         start = end - CHUNK_OVERLAP_CHARS
         if start < 0:
             start = 0
 
     return chunks
 
-def embed_texts(texts: List[str]) -> List[List[float]]:
-    vectors = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-        print(f"🧠 Embedding batch {i // BATCH_SIZE + 1} ({len(batch)} chunks)")
-        resp = aoai.embeddings.create(
-            model=AOAI_EMBED_DEPLOYMENT,
-            input=batch,
-            timeout=60,
-        )
-        vectors.extend([d.embedding for d in resp.data])
-    return vectors
 
-# ============================================================
-# Confluence Fetch (SPACE-SCOPED)
-# ============================================================
+def embed_text(text: str) -> List[float]:
+    resp = openai_client.embeddings.create(
+        model=AZURE_OPENAI_EMBED_DEPLOYMENT,
+        input=text
+    )
+    return resp.data[0].embedding
 
-def fetch_pages():
-    print(f"📥 Fetching pages from Confluence space '{CONFLUENCE_SPACE_KEY}'")
 
-    url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
-    params = {
-        "spaceKey": CONFLUENCE_SPACE_KEY,
-        "limit": 50,
-        "expand": "body.storage,version",
-        "type": "page",
-    }
-
-    pages = []
-    page_count = 0
-
-    while True:
-        page_count += 1
-        if page_count > MAX_PAGES:
-            print("⚠️ Max page limit reached, stopping pagination")
-            break
-
-        print(f"➡️ Fetching: {url}")
-        resp = requests.get(
-            url,
-            params=params,
-            auth=(CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN),
-            verify=SSL_CERT_PATH,
-            timeout=30,
-        )
-        resp.raise_for_status()
-
-        data = resp.json()
-        batch = data.get("results", [])
-        pages.extend(batch)
-
-        print(f"📄 Pages fetched so far: {len(pages)}")
-
-        next_link = data.get("_links", {}).get("next")
-        if not next_link:
-            break
-
-        url = CONFLUENCE_BASE_URL + next_link
-        params = None  # next already includes params
-
-    return pages
-
-# ============================================================
-# Index (vector-only, SDK-safe)
-# ============================================================
-
-def ensure_index():
+# --------------------------------------------------
+# Azure Search Index
+# --------------------------------------------------
+def create_index():
     try:
-        index_client.get_index(INDEX_NAME)
-        print("ℹ️ Index already exists")
+        index_client.get_index(AZURE_SEARCH_INDEX)
+        logging.info("Index already exists")
         return
     except Exception:
         pass
 
-    print("🆕 Creating Azure Search index")
-
     fields = [
-        SearchField(name="id", type=SearchFieldDataType.String, key=True),
-        SearchField(name="page_id", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True),
+        SimpleField(name="page_id", type=SearchFieldDataType.String, filterable=True),
         SearchField(name="title", type=SearchFieldDataType.String, searchable=True),
         SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
+        SimpleField(name="url", type=SearchFieldDataType.String, filterable=True),
         SearchField(
             name="content_vector",
             type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
             searchable=True,
-            vector_search_dimensions=VECTOR_DIMENSIONS,
-            vector_search_profile_name="vector-profile",
+            vector_search_dimensions=1536,
+            vector_search_configuration="vector-config",
         ),
     ]
 
     vector_search = VectorSearch(
-        algorithms=[HnswAlgorithmConfiguration(name="hnsw")],
-        profiles=[
-            VectorSearchProfile(
-                name="vector-profile",
-                algorithm_configuration_name="hnsw",
+        algorithm_configurations=[
+            VectorSearchAlgorithmConfiguration(
+                name="vector-config",
+                kind="hnsw"
             )
-        ],
+        ]
     )
 
     index = SearchIndex(
-        name=INDEX_NAME,
+        name=AZURE_SEARCH_INDEX,
         fields=fields,
         vector_search=vector_search,
     )
 
     index_client.create_index(index)
-    print("✅ Index created")
+    logging.info("Index created")
 
-# ============================================================
-# Main
-# ============================================================
 
+# --------------------------------------------------
+# Confluence Fetch
+# --------------------------------------------------
+def fetch_pages():
+    url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
+    params = {
+        "spaceKey": CONFLUENCE_SPACE_KEY,
+        "expand": "body.storage",
+        "limit": 50,
+    }
+
+    pages = []
+
+    while True:
+        logging.info(f"Fetching: {url}")
+        resp = requests.get(
+            url,
+            auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
+            params=params,
+            verify=VERIFY_SSL,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        pages.extend(data.get("results", []))
+
+        if "_links" in data and "next" in data["_links"]:
+            url = CONFLUENCE_BASE_URL + data["_links"]["next"]
+            params = None
+        else:
+            break
+
+    return pages
+
+
+# --------------------------------------------------
+# Run
+# --------------------------------------------------
 def run():
-    print("🚀 Ingestion started")
-    ensure_index()
+    logging.info("🚀 Ingestion started")
 
-    state = load_state()
+    create_index()
+
     pages = fetch_pages()
-    docs_to_upload = []
+    logging.info(f"Fetched {len(pages)} pages")
+
+    docs = []
 
     for page in pages:
         page_id = page["id"]
-        version = page["version"]["number"]
         title = page["title"]
-        content = page["body"]["storage"]["value"]
+        html = page["body"]["storage"]["value"]
+        text = html.replace("<", " ").replace(">", " ")
+        url = CONFLUENCE_BASE_URL + page["_links"]["webui"]
 
-        print(f"🔹 Processing page {page_id} | v{version}")
+        chunks = chunk_text(text)
 
-        if state.get(page_id) == version:
-            print("   ↳ Skipped (unchanged)")
-            continue
-
-        chunks = chunk_text(content)
-        vectors = embed_texts(chunks)
-
-        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            doc_id = hashlib.sha1(f"{page_id}-{i}".encode()).hexdigest()
-            docs_to_upload.append({
-                "id": doc_id,
+        for chunk in chunks:
+            embedding = embed_text(chunk)
+            docs.append({
+                "id": str(uuid.uuid4()),
                 "page_id": page_id,
                 "title": title,
                 "content": chunk,
-                "content_vector": vector,
+                "url": url,
+                "content_vector": embedding,
             })
 
-        state[page_id] = version
+        if len(docs) >= 100:
+            search_client.upload_documents(docs)
+            docs.clear()
 
-    print(f"📤 Uploading {len(docs_to_upload)} documents")
+    if docs:
+        search_client.upload_documents(docs)
 
-    for i in range(0, len(docs_to_upload), 500):
-        batch = docs_to_upload[i : i + 500]
-        search_client.upload_documents(batch)
-        print(f"   ↳ Uploaded {i + len(batch)}")
+    logging.info("✅ Ingestion completed")
 
-    save_state(state)
-    print("✅ Ingestion complete")
 
 if __name__ == "__main__":
     run()
