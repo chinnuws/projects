@@ -1,24 +1,30 @@
 import os
+from typing import List
 from fastapi import FastAPI
 from pydantic import BaseModel
-from dotenv import load_dotenv
-from azure.core.credentials import AzureKeyCredential
-from azure.search.documents import SearchClient
-from openai import AzureOpenAI
 
-# ---------------- ENV ----------------
+from azure.search.documents import SearchClient
+from azure.core.credentials import AzureKeyCredential
+from openai import AzureOpenAI
+from dotenv import load_dotenv
+
 load_dotenv()
 
+app = FastAPI()
+
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
-AZURE_OPENAI_EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
 
-# ---------------- CLIENTS ----------------
 search_client = SearchClient(
     AZURE_SEARCH_ENDPOINT,
     AZURE_SEARCH_INDEX,
@@ -27,68 +33,85 @@ search_client = SearchClient(
 
 openai_client = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
-    api_version="2023-05-15",
+    api_version=AZURE_OPENAI_API_VERSION,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
 )
 
-app = FastAPI()
-
-# ---------------- MODELS ----------------
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
 class QueryRequest(BaseModel):
     query: str
 
-# ---------------- PROMPT ----------------
-SYSTEM_PROMPT = """You are a Confluence knowledge assistant.
-Answer ONLY using the provided context.
-If the answer is not found, say you don't know.
-"""
+class QueryResponse(BaseModel):
+    answer: str
+    links: List[str]
 
-# ---------------- HELPERS ----------------
-def embed_query(text: str):
-    return openai_client.embeddings.create(
-        model=AZURE_OPENAI_EMBED_DEPLOYMENT,
-        input=text,
-    ).data[0].embedding
-
-def generate_answer(query: str, context: str):
-    resp = openai_client.chat.completions.create(
-        model=AZURE_OPENAI_CHAT_DEPLOYMENT,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion:\n{query}"},
-        ],
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+def embed_query(query: str) -> List[float]:
+    resp = openai_client.embeddings.create(
+        model=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+        input=query
     )
-    return resp.choices[0].message.content
+    return resp.data[0].embedding
 
-# ---------------- API ----------------
-@app.post("/query")
-def query_docs(req: QueryRequest):
-    query_vector = embed_query(req.query)
+def retrieve(query: str):
+    vector = embed_query(query)
 
     results = search_client.search(
         search_text=None,
-        vector_queries=[
-            {
-                "vector": query_vector,
-                "fields": "content_vector",
-                "k": 6,
-            }
-        ],
+        vector_queries=[{
+            "kind": "vector",
+            "vector": vector,
+            "fields": "content_vector",
+            "k": 6
+        }],
         select=["title", "content", "url"],
     )
 
-    docs = list(results)
+    docs = []
+    for r in results:
+        docs.append(r)
+
+    return docs
+
+def generate_answer(query: str, docs):
     context = "\n\n".join(d["content"] for d in docs)
 
-    answer = generate_answer(req.query, context)
+    system_prompt = (
+        "You are a helpful assistant. "
+        "Answer ONLY using the provided Confluence documentation."
+    )
 
-    references = [
-        {"title": d["title"], "url": d["url"]}
-        for d in docs
-    ]
+    resp = openai_client.chat.completions.create(
+        model=AZURE_OPENAI_CHAT_DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}
+        ],
+        temperature=0,
+    )
 
-    return {
-        "answer": answer,
-        "references": references
-    }
+    return resp.choices[0].message.content
+
+# --------------------------------------------------
+# API
+# --------------------------------------------------
+@app.post("/query", response_model=QueryResponse)
+def query_rag(req: QueryRequest):
+    docs = retrieve(req.query)
+    answer = generate_answer(req.query, docs)
+
+    links = []
+    seen = set()
+    for d in docs:
+        if d["url"] not in seen:
+            links.append(d["url"])
+            seen.add(d["url"])
+
+    return QueryResponse(
+        answer=answer,
+        links=links
+    )
