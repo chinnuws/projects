@@ -2,6 +2,7 @@ import os
 import uuid
 import requests
 from bs4 import BeautifulSoup
+from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
@@ -25,7 +26,9 @@ INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX")
 
 CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
 CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
+CONFLUENCE_USERNAME = os.getenv("CONFLUENCE_USERNAME")
 CONFLUENCE_TOKEN = os.getenv("CONFLUENCE_TOKEN")
+CONFLUENCE_CERT_PATH = os.getenv("CONFLUENCE_CERT_PATH", "confluence.crt")
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
@@ -97,7 +100,7 @@ def create_index():
     print("✅ Index created")
 
 # ======================
-# CONFLUENCE FETCH
+# CONFLUENCE FETCH (AUTH + SSL)
 # ======================
 def fetch_pages():
     url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
@@ -107,18 +110,27 @@ def fetch_pages():
         "limit": 50
     }
 
-    headers = {"Authorization": f"Bearer {CONFLUENCE_TOKEN}"}
+    auth = HTTPBasicAuth(CONFLUENCE_USERNAME, CONFLUENCE_TOKEN)
+
     pages = []
 
     while url:
-        resp = requests.get(url, headers=headers, params=params)
+        print(f"📥 Fetching: {url}")
+        resp = requests.get(
+            url,
+            auth=auth,
+            params=params,
+            verify=CONFLUENCE_CERT_PATH,
+            timeout=30
+        )
         resp.raise_for_status()
         data = resp.json()
-        pages.extend(data["results"])
-        url = data["_links"].get("next")
-        if url:
-            url = CONFLUENCE_BASE_URL + url
+        pages.extend(data.get("results", []))
 
+        next_link = data.get("_links", {}).get("next")
+        url = f"{CONFLUENCE_BASE_URL}{next_link}" if next_link else None
+
+    print(f"📄 Total pages fetched: {len(pages)}")
     return pages
 
 # ======================
@@ -127,19 +139,18 @@ def fetch_pages():
 def html_to_markdown(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
 
-    # Convert tables to markdown
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
-        md = "\n\n| " + " | ".join(
-            th.get_text(strip=True) for th in rows[0].find_all(["th", "td"])
-        ) + " |\n"
+        if not rows:
+            continue
 
-        md += "| " + " | ".join("---" for _ in rows[0].find_all(["th", "td"])) + " |\n"
+        headers = rows[0].find_all(["th", "td"])
+        md = "\n\n| " + " | ".join(h.get_text(strip=True) for h in headers) + " |\n"
+        md += "| " + " | ".join("---" for _ in headers) + " |\n"
 
         for row in rows[1:]:
-            md += "| " + " | ".join(
-                cell.get_text(strip=True) for cell in row.find_all(["td", "th"])
-            ) + " |\n"
+            cells = row.find_all(["td", "th"])
+            md += "| " + " | ".join(c.get_text(strip=True) for c in cells) + " |\n"
 
         table.replace_with(md)
 
@@ -161,11 +172,11 @@ def chunk_text(text):
 # EMBEDDINGS
 # ======================
 def embed(texts):
-    response = openai_client.embeddings.create(
+    resp = openai_client.embeddings.create(
         model=AZURE_OPENAI_EMBED_DEPLOYMENT,
         input=texts
     )
-    return [d.embedding for d in response.data]
+    return [d.embedding for d in resp.data]
 
 # ======================
 # INGEST
@@ -180,22 +191,19 @@ def ingest():
     for page in pages:
         ancestors = page.get("ancestors", [])
         parent_id = ancestors[-1]["id"] if ancestors else None
-        parent_titles = " > ".join(a["title"] for a in ancestors)
+        parent_path = " > ".join(a["title"] for a in ancestors)
 
         raw_html = page["body"]["storage"]["value"]
         clean_text = html_to_markdown(raw_html)
 
-        # 🔑 Parent context injected here
         contextual_text = f"""
 Page Title: {page['title']}
-Parent Path: {parent_titles}
+Parent Path: {parent_path}
 
 {clean_text}
 """
 
-        chunks = chunk_text(contextual_text)
-
-        for chunk in chunks:
+        for chunk in chunk_text(contextual_text):
             docs.append({
                 "id": str(uuid.uuid4()),
                 "title": page["title"],
