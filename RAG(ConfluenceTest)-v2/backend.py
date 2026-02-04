@@ -1,6 +1,7 @@
 import os
-from typing import List, Dict, Tuple
+from typing import List, Dict
 from dotenv import load_dotenv
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -23,20 +24,21 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
 AZURE_OPENAI_EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
 
-# Validate required env vars early
-required_envs = {
-    "AZURE_SEARCH_ENDPOINT": AZURE_SEARCH_ENDPOINT,
-    "AZURE_SEARCH_KEY": AZURE_SEARCH_KEY,
-    "AZURE_SEARCH_INDEX": AZURE_SEARCH_INDEX,
-    "AZURE_OPENAI_ENDPOINT": AZURE_OPENAI_ENDPOINT,
-    "AZURE_OPENAI_KEY": AZURE_OPENAI_KEY,
-    "AZURE_OPENAI_CHAT_DEPLOYMENT": AZURE_OPENAI_CHAT_DEPLOYMENT,
-    "AZURE_OPENAI_EMBED_DEPLOYMENT": AZURE_OPENAI_EMBED_DEPLOYMENT,
-}
+# ============================================================
+# Validation (fail fast)
+# ============================================================
+required = [
+    AZURE_SEARCH_ENDPOINT,
+    AZURE_SEARCH_KEY,
+    AZURE_SEARCH_INDEX,
+    AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_KEY,
+    AZURE_OPENAI_CHAT_DEPLOYMENT,
+    AZURE_OPENAI_EMBED_DEPLOYMENT,
+]
 
-missing = [k for k, v in required_envs.items() if not v]
-if missing:
-    raise RuntimeError(f"❌ Missing environment variables: {missing}")
+if not all(required):
+    raise RuntimeError("❌ Missing required environment variables")
 
 # ============================================================
 # Clients
@@ -59,22 +61,22 @@ openai_client = AzureOpenAI(
 app = FastAPI(title="Confluence RAG Backend")
 
 # ============================================================
-# Prompts
+# Prompt
 # ============================================================
 SYSTEM_PROMPT = """
 You are an internal enterprise knowledge assistant.
 
 Rules:
-- Use ONLY the provided Confluence context.
+- Use ONLY the provided Confluence content.
 - Confluence is the single source of truth.
 - Do NOT assume or hallucinate.
 - If the answer is not found, respond with:
   "I could not find this information in Confluence."
-- Be concise, accurate, and factual.
+- Be concise, factual, and clear.
 """
 
 # ============================================================
-# API models
+# API Models
 # ============================================================
 class QueryRequest(BaseModel):
     query: str
@@ -91,81 +93,67 @@ class QueryResponse(BaseModel):
 
 
 # ============================================================
-# Embedding helpers
+# Embedding
 # ============================================================
 def embed_query(query: str) -> List[float]:
     """
-    Convert a query into an embedding vector
+    Generate embedding for user query
     """
-    try:
-        resp = openai_client.embeddings.create(
-            model=AZURE_OPENAI_EMBED_DEPLOYMENT,
-            input=query,
-        )
-        return resp.data[0].embedding
-    except Exception as e:
-        raise RuntimeError(f"Embedding failed: {e}")
+    resp = openai_client.embeddings.create(
+        model=AZURE_OPENAI_EMBED_DEPLOYMENT,
+        input=query,
+    )
+    return resp.data[0].embedding
 
 
 # ============================================================
-# Retrieval helpers
+# Retrieval
 # ============================================================
-def retrieve_documents(query: str) -> Tuple[List[str], List[RelatedDoc]]:
+def retrieve_documents(query: str):
     """
-    Perform vector search and return:
-      - top context chunks
-      - top 6 unique Confluence pages (title + url)
+    Vector search against Azure AI Search.
+    Returns:
+      - context chunks (for grounding)
+      - top 6 related pages (title + url)
     """
     query_vector = embed_query(query)
 
-    try:
-        results = search_client.search(
-            search_text=None,
-            vector=query_vector,
-            vector_fields="content_vector",
-            top=20,
-        )
-    except Exception as e:
-        raise RuntimeError(f"Search failed: {e}")
+    results = search_client.search(
+        search_text=None,
+        vector=query_vector,
+        vector_fields="content_vector",
+        top=20,
+    )
 
-    context_chunks: List[str] = []
-    page_scores: Dict[str, Dict] = {}
+    chunks: List[str] = []
+    page_map: Dict[str, Dict] = {}
 
     for r in results:
-        # Context chunks for grounding
-        if r.get("content"):
-            context_chunks.append(r["content"])
+        chunks.append(r["content"])
 
-        # Unique pages for references
-        pid = r["page_id"]
-        if pid not in page_scores:
-            page_scores[pid] = {
+        page_id = r["page_id"]
+        if page_id not in page_map:
+            page_map[page_id] = {
                 "title": r["title"],
                 "url": r["url"],
                 "score": r["@search.score"],
             }
 
-    # Sort pages by relevance
-    top_pages = sorted(
-        page_scores.values(),
+    # Sort pages by relevance and keep top 6
+    related_pages = sorted(
+        page_map.values(),
         key=lambda x: x["score"],
         reverse=True,
     )[:6]
 
-    return (
-        context_chunks[:6],
-        [RelatedDoc(title=p["title"], url=p["url"]) for p in top_pages],
-    )
+    return chunks[:6], related_pages
 
 
 # ============================================================
-# Prompt construction
+# Prompt builder
 # ============================================================
-def build_prompt(context_chunks: List[str], user_query: str) -> List[dict]:
-    """
-    Build messages payload for Chat Completion
-    """
-    context = "\n\n".join(context_chunks)
+def build_messages(context_chunks: List[str], query: str) -> List[dict]:
+    context_text = "\n\n".join(context_chunks)
 
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -173,10 +161,10 @@ def build_prompt(context_chunks: List[str], user_query: str) -> List[dict]:
             "role": "user",
             "content": f"""
 Context:
-{context}
+{context_text}
 
 Question:
-{user_query}
+{query}
 """,
         },
     ]
@@ -186,44 +174,33 @@ Question:
 # Answer generation
 # ============================================================
 def generate_answer(messages: List[dict]) -> str:
-    """
-    Generate grounded answer using Azure OpenAI
-    """
-    try:
-        completion = openai_client.chat.completions.create(
-            model=AZURE_OPENAI_CHAT_DEPLOYMENT,
-            messages=messages,
-            temperature=0,
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        raise RuntimeError(f"Answer generation failed: {e}")
-
-
-# ============================================================
-# Main RAG flow
-# ============================================================
-def run_rag_pipeline(query: str) -> QueryResponse:
-    """
-    Full RAG pipeline:
-    retrieve → prompt → generate
-    """
-    context_chunks, related_docs = retrieve_documents(query)
-    messages = build_prompt(context_chunks, query)
-    answer = generate_answer(messages)
-
-    return QueryResponse(
-        answer=answer,
-        related_docs=related_docs,
+    completion = openai_client.chat.completions.create(
+        model=AZURE_OPENAI_CHAT_DEPLOYMENT,
+        messages=messages,
+        temperature=0,
     )
 
+    return completion.choices[0].message.content.strip()
+
 
 # ============================================================
-# API endpoint
+# API Endpoint
 # ============================================================
 @app.post("/query", response_model=QueryResponse)
 def query_rag(request: QueryRequest):
     try:
-        return run_rag_pipeline(request.query)
+        context_chunks, related_pages = retrieve_documents(request.query)
+
+        messages = build_messages(context_chunks, request.query)
+        answer = generate_answer(messages)
+
+        return QueryResponse(
+            answer=answer,
+            related_docs=[
+                RelatedDoc(title=p["title"], url=p["url"])
+                for p in related_pages
+            ],
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
