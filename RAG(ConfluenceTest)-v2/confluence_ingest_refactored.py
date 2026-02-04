@@ -1,10 +1,9 @@
 import os
-import json
-import time
 import uuid
-import requests
 import logging
+import requests
 from typing import List
+from dotenv import load_dotenv
 
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
@@ -19,14 +18,13 @@ from azure.search.documents.indexes.models import (
 )
 
 from openai import AzureOpenAI
-from dotenv import load_dotenv
 
 # --------------------------------------------------
 # Load env
 # --------------------------------------------------
 load_dotenv()
 
-CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL")
+CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL").rstrip("/")
 CONFLUENCE_USER = os.getenv("CONFLUENCE_USER")
 CONFLUENCE_API_TOKEN = os.getenv("CONFLUENCE_API_TOKEN")
 CONFLUENCE_SPACE_KEY = os.getenv("CONFLUENCE_SPACE_KEY")
@@ -43,7 +41,9 @@ AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
 CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "3000"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "400"))
 
-VERIFY_SSL = os.getenv("CONFLUENCE_CA_CERT", True)
+SSL_VERIFY = os.getenv("CONFLUENCE_CA_CERT", True)
+
+logging.basicConfig(level=logging.INFO)
 
 # --------------------------------------------------
 # Clients
@@ -65,21 +65,17 @@ search_client = SearchClient(
     AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
-logging.basicConfig(level=logging.INFO)
-
-
 # --------------------------------------------------
 # Helpers
 # --------------------------------------------------
 def chunk_text(text: str) -> List[str]:
     chunks = []
     start = 0
-    text_length = len(text)
+    length = len(text)
 
-    while start < text_length:
+    while start < length:
         end = start + CHUNK_MAX_CHARS
-        chunk = text[start:end]
-        chunks.append(chunk)
+        chunks.append(text[start:end])
         start = end - CHUNK_OVERLAP_CHARS
         if start < 0:
             start = 0
@@ -87,16 +83,16 @@ def chunk_text(text: str) -> List[str]:
     return chunks
 
 
-def embed_text(text: str) -> List[float]:
+def embed(text: str) -> List[float]:
     resp = openai_client.embeddings.create(
         model=AZURE_OPENAI_EMBED_DEPLOYMENT,
-        input=text
+        input=text,
     )
     return resp.data[0].embedding
 
 
 # --------------------------------------------------
-# Azure Search Index
+# Azure Search Index (vector only)
 # --------------------------------------------------
 def create_index():
     try:
@@ -125,7 +121,7 @@ def create_index():
         algorithm_configurations=[
             VectorSearchAlgorithmConfiguration(
                 name="vector-config",
-                kind="hnsw"
+                kind="hnsw",
             )
         ]
     )
@@ -141,13 +137,14 @@ def create_index():
 
 
 # --------------------------------------------------
-# Confluence Fetch
+# Confluence fetch (space-scoped)
 # --------------------------------------------------
 def fetch_pages():
     url = f"{CONFLUENCE_BASE_URL}/rest/api/content"
     params = {
         "spaceKey": CONFLUENCE_SPACE_KEY,
         "expand": "body.storage",
+        "type": "page",
         "limit": 50,
     }
 
@@ -159,7 +156,7 @@ def fetch_pages():
             url,
             auth=(CONFLUENCE_USER, CONFLUENCE_API_TOKEN),
             params=params,
-            verify=VERIFY_SSL,
+            verify=SSL_VERIFY,
             timeout=60,
         )
         resp.raise_for_status()
@@ -167,27 +164,27 @@ def fetch_pages():
 
         pages.extend(data.get("results", []))
 
-        if "_links" in data and "next" in data["_links"]:
-            url = CONFLUENCE_BASE_URL + data["_links"]["next"]
-            params = None
-        else:
+        next_link = data.get("_links", {}).get("next")
+        if not next_link:
             break
+
+        url = CONFLUENCE_BASE_URL + next_link
+        params = None
 
     return pages
 
 
 # --------------------------------------------------
-# Run
+# Run ingestion
 # --------------------------------------------------
 def run():
     logging.info("🚀 Ingestion started")
 
     create_index()
-
     pages = fetch_pages()
     logging.info(f"Fetched {len(pages)} pages")
 
-    docs = []
+    buffer = []
 
     for page in pages:
         page_id = page["id"]
@@ -199,22 +196,21 @@ def run():
         chunks = chunk_text(text)
 
         for chunk in chunks:
-            embedding = embed_text(chunk)
-            docs.append({
+            buffer.append({
                 "id": str(uuid.uuid4()),
                 "page_id": page_id,
                 "title": title,
                 "content": chunk,
                 "url": url,
-                "content_vector": embedding,
+                "content_vector": embed(chunk),
             })
 
-        if len(docs) >= 100:
-            search_client.upload_documents(docs)
-            docs.clear()
+        if len(buffer) >= 100:
+            search_client.upload_documents(buffer)
+            buffer.clear()
 
-    if docs:
-        search_client.upload_documents(docs)
+    if buffer:
+        search_client.upload_documents(buffer)
 
     logging.info("✅ Ingestion completed")
 
