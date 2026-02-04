@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import List, Dict
 from dotenv import load_dotenv
 
@@ -10,7 +11,7 @@ from azure.core.credentials import AzureKeyCredential
 from openai import AzureOpenAI
 
 # ============================================================
-# Load environment variables
+# Load env
 # ============================================================
 load_dotenv()
 
@@ -21,186 +22,142 @@ AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2023-05-15")
-AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
-AZURE_OPENAI_EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
+CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT")
 
-# ============================================================
-# Validation (fail fast)
-# ============================================================
-required = [
-    AZURE_SEARCH_ENDPOINT,
-    AZURE_SEARCH_KEY,
-    AZURE_SEARCH_INDEX,
-    AZURE_OPENAI_ENDPOINT,
-    AZURE_OPENAI_KEY,
-    AZURE_OPENAI_CHAT_DEPLOYMENT,
-    AZURE_OPENAI_EMBED_DEPLOYMENT,
-]
-
-if not all(required):
-    raise RuntimeError("❌ Missing required environment variables")
+TOP_K = int(os.getenv("TOP_K", "10"))
+TOP_LINKS = 6
 
 # ============================================================
 # Clients
 # ============================================================
 search_client = SearchClient(
-    endpoint=AZURE_SEARCH_ENDPOINT,
-    index_name=AZURE_SEARCH_INDEX,
-    credential=AzureKeyCredential(AZURE_SEARCH_KEY),
+    AZURE_SEARCH_ENDPOINT,
+    AZURE_SEARCH_INDEX,
+    AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
-openai_client = AzureOpenAI(
+aoai = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
     api_version=AZURE_OPENAI_API_VERSION,
 )
 
-# ============================================================
-# FastAPI app
-# ============================================================
-app = FastAPI(title="Confluence RAG Backend")
+app = FastAPI()
+logging.basicConfig(level=logging.INFO)
 
 # ============================================================
-# Prompt
-# ============================================================
-SYSTEM_PROMPT = """
-You are an internal enterprise knowledge assistant.
-
-Rules:
-- Use ONLY the provided Confluence content.
-- Confluence is the single source of truth.
-- Do NOT assume or hallucinate.
-- If the answer is not found, respond with:
-  "I could not find this information in Confluence."
-- Be concise, factual, and clear.
-"""
-
-# ============================================================
-# API Models
+# Models
 # ============================================================
 class QueryRequest(BaseModel):
     query: str
 
-
-class RelatedDoc(BaseModel):
+class Source(BaseModel):
     title: str
     url: str
 
-
 class QueryResponse(BaseModel):
     answer: str
-    related_docs: List[RelatedDoc]
-
+    sources: List[Source]
 
 # ============================================================
-# Embedding
+# Helpers
 # ============================================================
-def embed_query(query: str) -> List[float]:
-    """
-    Generate embedding for user query
-    """
-    resp = openai_client.embeddings.create(
-        model=AZURE_OPENAI_EMBED_DEPLOYMENT,
-        input=query,
+def embed_query(text: str) -> List[float]:
+    resp = aoai.embeddings.create(
+        model=EMBED_DEPLOYMENT,
+        input=text,
     )
     return resp.data[0].embedding
 
 
-# ============================================================
-# Retrieval
-# ============================================================
-def retrieve_documents(query: str):
-    """
-    Vector search against Azure AI Search.
-    Returns:
-      - context chunks (for grounding)
-      - top 6 related pages (title + url)
-    """
-    query_vector = embed_query(query)
+def retrieve(query: str) -> List[Dict]:
+    vector = embed_query(query)
 
     results = search_client.search(
-        search_text=None,
-        vector=query_vector,
-        vector_fields="content_vector",
-        top=20,
+        search_text=query,
+        vector_queries=[{
+            "kind": "vector",
+            "vector": vector,
+            "fields": "content_vector",
+            "k": TOP_K,
+        }],
+        query_type="semantic",
+        semantic_configuration_name="default",
+        top=TOP_K,
     )
 
-    chunks: List[str] = []
-    page_map: Dict[str, Dict] = {}
-
+    docs = []
     for r in results:
-        chunks.append(r["content"])
+        docs.append({
+            "title": r.get("title"),
+            "content": r.get("content"),
+            "url": r.get("url"),
+            "score": r["@search.score"],
+        })
 
-        page_id = r["page_id"]
-        if page_id not in page_map:
-            page_map[page_id] = {
-                "title": r["title"],
-                "url": r["url"],
-                "score": r["@search.score"],
-            }
-
-    # Sort pages by relevance and keep top 6
-    related_pages = sorted(
-        page_map.values(),
-        key=lambda x: x["score"],
-        reverse=True,
-    )[:6]
-
-    return chunks[:6], related_pages
+    return docs
 
 
-# ============================================================
-# Prompt builder
-# ============================================================
-def build_messages(context_chunks: List[str], query: str) -> List[dict]:
-    context_text = "\n\n".join(context_chunks)
+def generate_answer(query: str, docs: List[Dict]) -> str:
+    if not docs:
+        return "I could not find this information in Confluence."
 
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"""
-Context:
-{context_text}
-
-Question:
-{query}
-""",
-        },
-    ]
-
-
-# ============================================================
-# Answer generation
-# ============================================================
-def generate_answer(messages: List[dict]) -> str:
-    completion = openai_client.chat.completions.create(
-        model=AZURE_OPENAI_CHAT_DEPLOYMENT,
-        messages=messages,
-        temperature=0,
+    context = "\n\n".join(
+        f"{d['title']}:\n{d['content']}"
+        for d in docs
     )
 
-    return completion.choices[0].message.content.strip()
+    system_prompt = (
+        "You are an internal knowledge assistant.\n"
+        "Use ONLY the provided Confluence content.\n"
+        "If the answer is not present, say you do not know."
+    )
 
+    resp = aoai.chat.completions.create(
+        model=CHAT_DEPLOYMENT,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Question: {query}\n\nConfluence Content:\n{context}",
+            },
+        ],
+    )
+
+    return resp.choices[0].message.content.strip()
 
 # ============================================================
-# API Endpoint
+# API
 # ============================================================
 @app.post("/query", response_model=QueryResponse)
-def query_rag(request: QueryRequest):
+def query_rag(req: QueryRequest):
     try:
-        context_chunks, related_pages = retrieve_documents(request.query)
+        docs = retrieve(req.query)
+        answer = generate_answer(req.query, docs)
 
-        messages = build_messages(context_chunks, request.query)
-        answer = generate_answer(messages)
+        # ✅ De-duplicate & rank links
+        page_map = {}
+        for d in docs:
+            key = (d["title"], d["url"])
+            if key not in page_map or d["score"] > page_map[key]["score"]:
+                page_map[key] = d
+
+        sources = sorted(
+            page_map.values(),
+            key=lambda x: x["score"],
+            reverse=True,
+        )[:TOP_LINKS]
 
         return QueryResponse(
             answer=answer,
-            related_docs=[
-                RelatedDoc(title=p["title"], url=p["url"])
-                for p in related_pages
+            sources=[
+                Source(title=s["title"], url=s["url"])
+                for s in sources
             ],
         )
 
     except Exception as e:
+        logging.exception("Query failed")
         raise HTTPException(status_code=500, detail=str(e))
