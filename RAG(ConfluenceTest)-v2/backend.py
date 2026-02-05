@@ -34,7 +34,7 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
 EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
-TOP_K = int(os.getenv("TOP_K", "10"))  # Increased to get more results for deduplication
+TOP_K = int(os.getenv("TOP_K", "10"))
 
 # --------------------------------------------------
 # CLIENTS
@@ -48,7 +48,7 @@ search_client = SearchClient(
 aoai = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    api_version="2023-05-15",
+    api_version="2024-02-15-preview",  # ✅ Updated to match ingestion
 )
 
 # --------------------------------------------------
@@ -91,11 +91,11 @@ def retrieve(query: str):
     query_vector = embed_query(query)
     
     results = search_client.search(
-        search_text=query,  # lexical + semantic
+        search_text=query,
         vector_queries=[{
-            "kind": "vector",  # REQUIRED for 11.6.x+
+            "kind": "vector",
             "vector": query_vector,
-            "fields": "content_vector",  # FIXED: Changed from "vector" to "content_vector"
+            "fields": "content_vector",  # ✅ Correct field name
             "k": TOP_K,
         }],
         query_type="semantic",
@@ -103,9 +103,9 @@ def retrieve(query: str):
         top=TOP_K,
     )
     
-    # ADDED: Deduplicate by page_id to get unique pages (top 6)
+    # Deduplicate by page_id to get unique pages (top 6)
     seen_pages = {}
-    all_chunks = []  # Keep all chunks for answer generation
+    all_chunks = []
     
     for r in results:
         page_id = r.get("page_id")
@@ -142,7 +142,7 @@ def generate_answer(query: str, docs: List[dict]) -> str:
     # Use top relevant chunks for context
     context = "\n\n".join(
         f"Title: {d['title']}\nContent: {d['content']}"
-        for d in docs[:5]  # Use top 5 chunks for context
+        for d in docs[:5]
     )
     
     system_prompt = (
@@ -196,9 +196,6 @@ def health():
     """Health check endpoint"""
     return {"status": "ok"}
 
-# --------------------------------------------------
-# Additional endpoints for debugging
-# --------------------------------------------------
 @app.get("/")
 def root():
     """Root endpoint"""
