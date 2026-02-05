@@ -1,9 +1,7 @@
 """
 Streamlit chatbot frontend - Professional Design
-✅ Fixed: Enter key triggers search
-✅ Fixed: 🔍 Search icon (matches screenshot)
-✅ Fixed: Exactly 6 recommended links
-✅ Removed: Footer tagline
+✅ Fixed: Enter key ACTUALLY triggers search
+✅ Improved: Beautiful aesthetics, removed unnecessary gaps
 """
 import streamlit as st
 import requests
@@ -25,7 +23,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# SESSION STATE INITIALIZATION (MUST BE AT TOP)
+# SESSION STATE INITIALIZATION
 # ============================================================
 if "current_query" not in st.session_state:
     st.session_state.current_query = ""
@@ -33,22 +31,30 @@ if "show_results" not in st.session_state:
     st.session_state.show_results = False
 if "last_response" not in st.session_state:
     st.session_state.last_response = None
+if "trigger_search" not in st.session_state:
+    st.session_state.trigger_search = False
 
 # ============================================================
-# CUSTOM CSS
+# CUSTOM CSS - IMPROVED AESTHETICS
 # ============================================================
 st.markdown("""
 <style>
+    /* Remove default Streamlit padding/margins */
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 0rem;
+    }
+    
     /* Main container */
     .main {
-        padding: 2rem;
+        padding: 1rem 2rem;
     }
     
     /* Header styling */
     .header-container {
         text-align: center;
         padding: 1.5rem 0;
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         border-radius: 10px;
         color: white;
@@ -57,7 +63,7 @@ st.markdown("""
     .header-title {
         font-size: 2.5rem;
         font-weight: 700;
-        margin-bottom: 0.5rem;
+        margin-bottom: 0.3rem;
     }
     
     .header-subtitle {
@@ -65,62 +71,16 @@ st.markdown("""
         opacity: 0.9;
     }
     
-    /* Answer box */
-    .answer-box {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border-left: 4px solid #667eea;
-        margin: 1.5rem 0;
-    }
-    
-    .answer-label {
-        font-weight: 600;
-        color: #667eea;
-        font-size: 1.1rem;
-        margin-bottom: 0.5rem;
-    }
-    
-    /* Sources section */
-    .sources-container {
-        margin-top: 2rem;
-    }
-    
-    .source-item {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        margin-bottom: 0.8rem;
-        border: 1px solid #e0e0e0;
-        transition: all 0.3s ease;
-    }
-    
-    .source-item:hover {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        border-color: #667eea;
-    }
-    
-    .source-title {
-        font-weight: 600;
-        color: #333;
-        margin-bottom: 0.3rem;
-    }
-    
-    .source-link {
-        color: #667eea;
-        text-decoration: none;
-        font-weight: 500;
-    }
-    
-    .source-link:hover {
-        text-decoration: underline;
+    /* Remove extra spacing after input */
+    .stTextInput {
+        margin-bottom: 0rem !important;
     }
     
     /* Input styling - matches screenshot */
     .stTextInput > div > div > input {
         border-radius: 8px;
         border: 2px solid #e0e0e0;
-        padding: 0.75rem 0.75rem 0.75rem 1rem;
+        padding: 0.75rem 1rem;
         font-size: 1rem;
         background: white;
     }
@@ -130,36 +90,112 @@ st.markdown("""
         box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
     }
     
-    /* Button styling - Search button */
-    .search-btn > button {
+    /* Button container spacing */
+    .button-row {
+        margin-top: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    /* Search button - gradient with icon */
+    div[data-testid="column"]:nth-child(2) button {
         border-radius: 8px !important;
         font-weight: 600;
-        transition: all 0.3s ease;
         border: none;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
         color: white !important;
-        height: 42px;
-        width: 70px;
+        height: 50px;
+        padding: 0 1.5rem;
+        font-size: 1.2rem;
     }
     
-    .search-btn > button:hover {
+    div[data-testid="column"]:nth-child(2) button:hover {
         background: linear-gradient(135deg, #5a67d8 0%, #6b46c1 100%) !important;
         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        transform: translateY(-1px);
     }
     
-    /* Clear button */
-    .clear-btn > button {
+    /* Clear button styling */
+    .clear-button button {
         border-radius: 8px;
         border: 2px solid #e0e0e0;
         background: white;
         color: #666;
         font-weight: 500;
-        height: 42px;
+        height: 45px;
+        width: 100%;
+        margin-top: 0.5rem;
     }
     
-    .clear-btn > button:hover {
+    .clear-button button:hover {
         background: #f7f7f7;
         border-color: #d0d0d0;
+    }
+    
+    /* Answer box */
+    .answer-box {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 4px solid #667eea;
+        margin: 1rem 0;
+    }
+    
+    .answer-label {
+        font-weight: 600;
+        color: #667eea;
+        font-size: 1.1rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    /* Question display */
+    .question-box {
+        background: #ffffff;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 3px solid #667eea;
+        margin-bottom: 1rem;
+        font-weight: 500;
+    }
+    
+    /* Sources section */
+    .sources-header {
+        font-size: 1.3rem;
+        font-weight: 600;
+        color: #333;
+        margin-top: 1.5rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    .sources-subtext {
+        color: #888;
+        font-size: 0.9rem;
+        margin-bottom: 1rem;
+    }
+    
+    /* Source links - clean list style */
+    .source-link-item {
+        padding: 0.7rem 1rem;
+        margin-bottom: 0.6rem;
+        background: white;
+        border-radius: 8px;
+        border: 1px solid #e0e0e0;
+        transition: all 0.2s ease;
+    }
+    
+    .source-link-item:hover {
+        border-color: #667eea;
+        box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
+        transform: translateX(5px);
+    }
+    
+    .source-link-item a {
+        color: #667eea;
+        text-decoration: none;
+        font-weight: 500;
+    }
+    
+    .source-link-item a:hover {
+        text-decoration: underline;
     }
     
     /* Loading spinner */
@@ -167,13 +203,28 @@ st.markdown("""
         border-color: #667eea;
     }
     
-    /* Error message */
-    .error-box {
-        background: #fee;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #f44336;
-        color: #c62828;
+    /* Remove horizontal lines */
+    hr {
+        margin: 0.5rem 0 !important;
+        border-color: #f0f0f0 !important;
+    }
+    
+    /* Empty state styling */
+    .empty-state {
+        text-align: center;
+        margin-top: 3rem;
+        color: #888;
+    }
+    
+    .empty-state-title {
+        font-size: 1.3rem;
+        margin-bottom: 0.8rem;
+        color: #555;
+    }
+    
+    .empty-state-subtitle {
+        font-size: 0.95rem;
+        color: #999;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -189,58 +240,52 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# SEARCH INPUT WITH ENTER KEY SUPPORT
+# SEARCH INPUT - WITH PROPER ENTER KEY SUPPORT
 # ============================================================
-# Single row with input + buttons (matches screenshot)
-col1, col2 = st.columns([6, 1])
+with st.form(key="search_form", clear_on_submit=False):
+    col1, col2 = st.columns([5, 1])
+    
+    with col1:
+        query_input = st.text_input(
+            "",
+            placeholder="Type your question here...",
+            key="query_input_field",
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        search_clicked = st.form_submit_button("🔍", use_container_width=True)
 
-with col1:
-    query_input = st.text_input(
-        "",
-        placeholder="Type your question here...",
-        key="query_input_field",
-        label_visibility="collapsed",
-        help="Press Enter or click 🔍 to search"
-    )
-
-with col2:
-    search_clicked = st.button("🔍", key="search_btn", help="Search", use_container_width=False)
-
-# Clear button below
+# Clear button outside form
+st.markdown('<div class="clear-button">', unsafe_allow_html=True)
 clear_clicked = st.button("Clear", key="clear_btn", use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
-# BUTTON HANDLERS (ENTER KEY + CLICK)
+# SEARCH TRIGGER (ENTER OR BUTTON)
 # ============================================================
-# Enter key OR Search button triggers search
-if (search_clicked or st.session_state.get("enter_pressed")) and query_input:
+if search_clicked and query_input:
     st.session_state.current_query = query_input.strip()
     st.session_state.show_results = True
     st.session_state.last_response = None
-    st.session_state.enter_pressed = False  # Reset
 
 if clear_clicked:
-    # Clear all session state
     st.session_state.current_query = ""
     st.session_state.show_results = False
     st.session_state.last_response = None
-    st.session_state.enter_pressed = False
     st.rerun()
 
 # ============================================================
-# ENTER KEY DETECTION
-# ============================================================
-if query_input and st.button("", key="dummy", help=""):  # Hidden button for Enter detection
-    pass
-
-# ============================================================
-# QUERY PROCESSING
+# QUERY PROCESSING & RESULTS
 # ============================================================
 if st.session_state.show_results and st.session_state.current_query:
     
     # Show the query being processed
-    st.markdown(f"**Question:** {st.session_state.current_query}")
-    st.markdown("---")
+    st.markdown(f"""
+    <div class="question-box">
+        <strong>Question:</strong> {st.session_state.current_query}
+    </div>
+    """, unsafe_allow_html=True)
     
     # Only make API call if we don't have cached response
     if st.session_state.last_response is None:
@@ -274,46 +319,49 @@ if st.session_state.show_results and st.session_state.current_query:
         # ANSWER SECTION
         # ============================================================
         st.markdown('<div class="answer-box">', unsafe_allow_html=True)
-        st.markdown('<div class="answer-label">Answer:</div>', unsafe_allow_html=True)
+        st.markdown('<div class="answer-label">💡 Answer</div>', unsafe_allow_html=True)
         st.markdown(data.get("answer", "No answer available."))
         st.markdown('</div>', unsafe_allow_html=True)
         
         # ============================================================
-        # SOURCES SECTION (EXACTLY 6 LINKS)
+        # RECOMMENDED LINKS (EXACTLY 6)
         # ============================================================
         if data.get("sources"):
-            st.markdown("### 📚 Recommended Links")
-            st.markdown("*Click on the links to view full documentation*")
-            st.markdown("")
+            st.markdown('<div class="sources-header">📚 Recommended Links</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sources-subtext">Click to view full documentation</div>', unsafe_allow_html=True)
             
-            sources = data["sources"][:6]  # ✅ EXACTLY FIRST 6
+            sources = data["sources"][:6]  # ✅ EXACTLY 6 MAX
             
             for idx, source in enumerate(sources, 1):
                 title = source.get("title", "Untitled")
                 url = source.get("url", "")
                 
                 if url:
-                    # Create clickable link
-                    st.markdown(
-                        f"{idx}. [{title}]({url})",
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f"""
+                    <div class="source-link-item">
+                        {idx}. <a href="{url}" target="_blank">{title}</a>
+                    </div>
+                    """, unsafe_allow_html=True)
                 else:
-                    st.markdown(f"{idx}. {title} *(URL not available)*")
+                    st.markdown(f"""
+                    <div class="source-link-item">
+                        {idx}. {title} <em>(URL not available)</em>
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
-            st.info("No recommended links found.")
+            st.info("ℹ️ No recommended links found.")
 
 # ============================================================
-# EMPTY STATE
+# EMPTY STATE (WHEN NO SEARCH YET)
 # ============================================================
-if not st.session_state.show_results:
+else:
     st.markdown("""
-    <div style="text-align: center; margin-top: 3rem; color: #888;">
-        <div style="font-size: 1.2rem; margin-bottom: 1rem;">
-            Ask anything about our documentation
+    <div class="empty-state">
+        <div class="empty-state-title">
+            💬 Ask anything about our documentation
         </div>
-        <div style="font-size: 0.9rem;">
-            e.g., "What is our deployment process?" or "How do we handle incidents?"
+        <div class="empty-state-subtitle">
+            Try: "What is our deployment process?" or "How do we handle incidents?"
         </div>
     </div>
     """, unsafe_allow_html=True)
