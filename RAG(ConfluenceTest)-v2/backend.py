@@ -1,184 +1,212 @@
-import os
-import traceback
-from typing import List
+"""
+backend.py
+FastAPI backend for Confluence RAG
+- Azure AI Search (vector + semantic reranker)
+- Azure OpenAI chat + embeddings
+- Compatible with azure-search-documents 11.6.x
+"""
 
+import os
+import logging
+from typing import List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
+# Azure Search
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 
+# Azure OpenAI
 from openai import AzureOpenAI
 
 # --------------------------------------------------
 # ENV
 # --------------------------------------------------
-AZURE_SEARCH_ENDPOINT = os.environ["AZURE_SEARCH_ENDPOINT"]
-AZURE_SEARCH_KEY = os.environ["AZURE_SEARCH_KEY"]
-AZURE_SEARCH_INDEX = os.environ["AZURE_SEARCH_INDEX"]
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
-AZURE_OPENAI_KEY = os.environ["AZURE_OPENAI_KEY"]
-AZURE_OPENAI_CHAT_DEPLOYMENT = os.environ["AZURE_OPENAI_CHAT_DEPLOYMENT"]
-AZURE_OPENAI_EMBED_DEPLOYMENT = os.environ["AZURE_OPENAI_EMBED_DEPLOYMENT"]
-AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2023-05-15")
-
-TOP_K = 6
+AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
+AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
+CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT")
+EMBED_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
+TOP_K = int(os.getenv("TOP_K", "10"))  # Increased to get more results for deduplication
 
 # --------------------------------------------------
 # CLIENTS
 # --------------------------------------------------
 search_client = SearchClient(
-    endpoint=AZURE_SEARCH_ENDPOINT,
-    index_name=AZURE_SEARCH_INDEX,
-    credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+    AZURE_SEARCH_ENDPOINT,
+    AZURE_SEARCH_INDEX,
+    AzureKeyCredential(AZURE_SEARCH_KEY),
 )
 
-openai_client = AzureOpenAI(
+aoai = AzureOpenAI(
     api_key=AZURE_OPENAI_KEY,
-    api_version=AZURE_OPENAI_API_VERSION,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version="2023-05-15",
 )
 
 # --------------------------------------------------
 # FASTAPI
 # --------------------------------------------------
-app = FastAPI()
+app = FastAPI(title="Confluence RAG API")
 
+# Add CORS middleware for Kubernetes deployment
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # adjust for prod
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# MODELS
-# --------------------------------------------------
 class QueryRequest(BaseModel):
-    question: str
-
-class RecommendedDoc(BaseModel):
-    title: str
-    url: str
+    query: str
 
 class QueryResponse(BaseModel):
     answer: str
-    recommended_docs: List[RecommendedDoc]
+    sources: List[dict]
 
 # --------------------------------------------------
-# SYSTEM PROMPT
-# --------------------------------------------------
-SYSTEM_PROMPT = """
-You are an internal documentation assistant.
-Answer the user's question using ONLY the provided documentation context.
-If the answer is not present, say you do not know.
-Keep the answer concise and factual.
-"""
-
-# --------------------------------------------------
-# EMBEDDINGS
+# HELPERS
 # --------------------------------------------------
 def embed_query(text: str) -> List[float]:
-    resp = openai_client.embeddings.create(
-        model=AZURE_OPENAI_EMBED_DEPLOYMENT,
-        input=text
+    """Generate embedding for query text"""
+    resp = aoai.embeddings.create(
+        model=EMBED_DEPLOYMENT,
+        input=text,
     )
     return resp.data[0].embedding
 
-# --------------------------------------------------
-# SEARCH
-# --------------------------------------------------
-def search_docs(query: str, vector: List[float]):
+def retrieve(query: str):
+    """
+    Retrieve relevant documents using hybrid search (vector + semantic)
+    Returns top 6 unique Confluence pages
+    """
+    query_vector = embed_query(query)
+    
     results = search_client.search(
-        search_text=query,
-        vector=vector,
+        search_text=query,  # lexical + semantic
+        vector_queries=[{
+            "kind": "vector",  # REQUIRED for 11.6.x+
+            "vector": query_vector,
+            "fields": "content_vector",  # FIXED: Changed from "vector" to "content_vector"
+            "k": TOP_K,
+        }],
+        query_type="semantic",
+        semantic_configuration_name="default",
         top=TOP_K,
-        vector_fields="content_vector",
-        select=["content", "title", "url"]
     )
-    return list(results)
+    
+    # ADDED: Deduplicate by page_id to get unique pages (top 6)
+    seen_pages = {}
+    all_chunks = []  # Keep all chunks for answer generation
+    
+    for r in results:
+        page_id = r.get("page_id")
+        title = r.get("title", "Untitled")
+        content = r.get("content", "")
+        url = r.get("url", "")
+        score = r.get("@search.score", 0)
+        
+        # Collect all chunks for context
+        all_chunks.append({
+            "title": title,
+            "content": content,
+            "url": url,
+            "score": score,
+            "page_id": page_id,
+        })
+        
+        # Track unique pages for sources (limit to top 6)
+        if page_id and page_id not in seen_pages and len(seen_pages) < 6:
+            seen_pages[page_id] = {
+                "title": title,
+                "url": url,
+                "score": score,
+                "page_id": page_id,
+            }
+    
+    return all_chunks, list(seen_pages.values())
 
-# --------------------------------------------------
-# ANSWER GENERATION
-# --------------------------------------------------
-def generate_answer(question: str, docs: list) -> str:
-    context_blocks = []
-    for d in docs:
-        content = d.get("content", "")
-        title = d.get("title", "")
-        context_blocks.append(f"Title: {title}\n{content}")
-
-    context = "\n\n---\n\n".join(context_blocks)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"""
-Context:
-{context}
-
-Question:
-{question}
-"""
-        }
-    ]
-
-    response = openai_client.chat.completions.create(
-        model=AZURE_OPENAI_CHAT_DEPLOYMENT,
-        messages=messages,
-        temperature=0.2,
-        max_tokens=600
+def generate_answer(query: str, docs: List[dict]) -> str:
+    """Generate answer using Azure OpenAI with retrieved context"""
+    if not docs:
+        return "I could not find relevant information in Confluence."
+    
+    # Use top relevant chunks for context
+    context = "\n\n".join(
+        f"Title: {d['title']}\nContent: {d['content']}"
+        for d in docs[:5]  # Use top 5 chunks for context
     )
-
-    return response.choices[0].message.content.strip()
+    
+    system_prompt = (
+        "You are an internal knowledge assistant.\n"
+        "Answer ONLY using the provided Confluence content.\n"
+        "If the answer is not present, say you do not know.\n"
+        "Be concise and accurate."
+    )
+    
+    resp = aoai.chat.completions.create(
+        model=CHAT_DEPLOYMENT,
+        temperature=0,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Question: {query}\n\nConfluence Content:\n{context}",
+            },
+        ],
+    )
+    
+    return resp.choices[0].message.content.strip()
 
 # --------------------------------------------------
-# API
+# API ENDPOINTS
 # --------------------------------------------------
 @app.post("/query", response_model=QueryResponse)
-def query_docs(req: QueryRequest):
+def query_rag(req: QueryRequest):
+    """
+    Main RAG endpoint
+    - Retrieves relevant documents from Azure AI Search
+    - Generates answer using Azure OpenAI
+    - Returns answer with top 6 unique source pages
+    """
     try:
-        query_embedding = embed_query(req.question)
-        search_results = search_docs(req.question, query_embedding)
-
-        if not search_results:
-            return QueryResponse(
-                answer="I could not find relevant information in the documentation.",
-                recommended_docs=[]
-            )
-
-        answer = generate_answer(req.question, search_results)
-
-        # Top 6 unique recommended links (title + url only)
-        seen = set()
-        recommended = []
-        for r in search_results:
-            key = (r["title"], r["url"])
-            if key not in seen:
-                seen.add(key)
-                recommended.append(
-                    RecommendedDoc(
-                        title=r["title"],
-                        url=r["url"]
-                    )
-                )
-            if len(recommended) == 6:
-                break
-
-        return QueryResponse(
-            answer=answer,
-            recommended_docs=recommended
-        )
-
+        # Retrieve documents (all chunks + unique pages)
+        all_chunks, unique_pages = retrieve(req.query)
+        
+        # Generate answer using all relevant chunks
+        answer = generate_answer(req.query, all_chunks)
+        
+        # Return unique pages as sources (top 6)
+        return QueryResponse(answer=answer, sources=unique_pages)
+    
     except Exception as e:
-        traceback.print_exc()
+        logging.exception("Query failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --------------------------------------------------
 @app.get("/health")
 def health():
+    """Health check endpoint"""
     return {"status": "ok"}
+
+# --------------------------------------------------
+# Additional endpoints for debugging
+# --------------------------------------------------
+@app.get("/")
+def root():
+    """Root endpoint"""
+    return {
+        "service": "Confluence RAG API",
+        "status": "running",
+        "endpoints": {
+            "query": "/query",
+            "health": "/health",
+        }
+    }
