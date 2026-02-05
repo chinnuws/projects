@@ -1,9 +1,9 @@
 """
-Simple & Clean Streamlit Frontend
-✅ Compact search bar + buttons
-✅ Perfect alignment
+Production Frontend - Kubernetes Ready
+✅ Clickable links work in Kubernetes
+✅ Clear button works in Kubernetes  
+✅ Correct Confluence URLs (no duplicate /wiki)
 ✅ Enter key works
-✅ Clear button works in Kubernetes
 ✅ No warnings
 """
 import streamlit as st
@@ -22,15 +22,21 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Session state
+# ============================================================
+# SESSION STATE
+# ============================================================
 if "current_query" not in st.session_state:
     st.session_state.current_query = ""
 if "show_results" not in st.session_state:
     st.session_state.show_results = False
 if "last_response" not in st.session_state:
     st.session_state.last_response = None
+if "clear_triggered" not in st.session_state:
+    st.session_state.clear_triggered = False
 
-# Clean CSS
+# ============================================================
+# CSS
+# ============================================================
 st.markdown("""
 <style>
     .main { 
@@ -39,7 +45,6 @@ st.markdown("""
         margin: 0 auto;
     }
     
-    /* Simple title */
     .page-title {
         font-size: 1.8rem;
         font-weight: 700;
@@ -48,15 +53,7 @@ st.markdown("""
         text-align: left;
     }
     
-    /* Search container - perfect alignment */
-    .search-row {
-        display: flex;
-        gap: 0.5rem;
-        align-items: stretch;
-        margin-bottom: 0.8rem;
-    }
-    
-    /* Input styling */
+    /* Perfect alignment */
     .stTextInput > div > div > input {
         border: 2px solid #cbd5e1 !important;
         border-radius: 8px !important;
@@ -70,7 +67,7 @@ st.markdown("""
         box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
     }
     
-    /* Buttons - same height as input */
+    /* Buttons same height */
     .stButton > button {
         height: 48px !important;
         border-radius: 8px !important;
@@ -100,7 +97,7 @@ st.markdown("""
         background: #e2e8f0 !important;
     }
     
-    /* Results sections */
+    /* Result sections */
     .result-section {
         background: #f8fafc;
         border: 1px solid #e2e8f0;
@@ -116,7 +113,7 @@ st.markdown("""
         margin-bottom: 0.8rem;
     }
     
-    /* Link items */
+    /* Clickable links - Kubernetes compatible */
     .link-item {
         background: white;
         border: 1px solid #e2e8f0;
@@ -124,23 +121,46 @@ st.markdown("""
         padding: 1rem;
         margin-bottom: 0.7rem;
         transition: all 0.2s;
+        display: block;
     }
     
     .link-item:hover {
         border-color: #3b82f6;
         box-shadow: 0 2px 8px rgba(59, 130, 246, 0.1);
+        cursor: pointer;
     }
     
-    /* Remove extra spacing */
+    /* Link styling - force clickable in K8s */
+    .link-item a {
+        color: #1e293b !important;
+        text-decoration: none !important;
+        display: block;
+        width: 100%;
+    }
+    
+    .link-item a:hover {
+        color: #3b82f6 !important;
+    }
+    
+    .link-number {
+        color: #3b82f6;
+        font-weight: 700;
+        margin-right: 0.5rem;
+    }
+    
     .stMarkdown { margin: 0 !important; }
     .block-container { padding-top: 2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Simple title
+# ============================================================
+# TITLE
+# ============================================================
 st.markdown('<h1 class="page-title">📚 Confluence Knowledge Base</h1>', unsafe_allow_html=True)
 
-# Search form - perfect alignment
+# ============================================================
+# SEARCH FORM
+# ============================================================
 with st.form(key="search_form", clear_on_submit=False):
     col1, col2, col3 = st.columns([6, 1, 1])
     
@@ -149,7 +169,8 @@ with st.form(key="search_form", clear_on_submit=False):
             "Search",
             placeholder="Ask a question...",
             key="query_field",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            value=st.session_state.current_query if not st.session_state.clear_triggered else ""
         )
     
     with col2:
@@ -158,20 +179,41 @@ with st.form(key="search_form", clear_on_submit=False):
     with col3:
         clear_btn = st.form_submit_button("Clear", use_container_width=True)
 
-# Handle search
+# Reset clear trigger
+if st.session_state.clear_triggered:
+    st.session_state.clear_triggered = False
+
+# ============================================================
+# HANDLE CLEAR - KUBERNETES FIX
+# ============================================================
+if clear_btn:
+    # Complete state reset for Kubernetes
+    keys_to_delete = []
+    for key in st.session_state.keys():
+        if not key.startswith('FormSubmitter:'):
+            keys_to_delete.append(key)
+    
+    for key in keys_to_delete:
+        del st.session_state[key]
+    
+    # Reinitialize
+    st.session_state.current_query = ""
+    st.session_state.show_results = False
+    st.session_state.last_response = None
+    st.session_state.clear_triggered = True
+    st.rerun()
+
+# ============================================================
+# HANDLE SEARCH
+# ============================================================
 if search_btn and query_input:
     st.session_state.current_query = query_input.strip()
     st.session_state.show_results = True
     st.session_state.last_response = None
 
-# Handle clear
-if clear_btn:
-    st.session_state.current_query = ""
-    st.session_state.show_results = False
-    st.session_state.last_response = None
-    st.rerun()
-
-# Results display
+# ============================================================
+# DISPLAY RESULTS
+# ============================================================
 if st.session_state.show_results and st.session_state.current_query:
     
     # Question
@@ -193,6 +235,12 @@ if st.session_state.show_results and st.session_state.current_query:
                 )
                 resp.raise_for_status()
                 st.session_state.last_response = resp.json()
+            except requests.exceptions.Timeout:
+                st.error("⏱️ Request timed out. Please try again.")
+                st.session_state.show_results = False
+            except requests.exceptions.ConnectionError:
+                st.error(f"❌ Could not connect to backend at {API_URL}")
+                st.session_state.show_results = False
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
                 st.session_state.show_results = False
@@ -208,7 +256,7 @@ if st.session_state.show_results and st.session_state.current_query:
         st.markdown(data.get("answer", "No answer found."))
         st.markdown("</div>", unsafe_allow_html=True)
         
-        # Links
+        # Links - KUBERNETES CLICKABLE FIX
         if data.get("sources"):
             st.markdown("""
             <div class="result-section">
@@ -218,17 +266,20 @@ if st.session_state.show_results and st.session_state.current_query:
             for i, src in enumerate(data["sources"][:6], 1):
                 title = src.get("title", "Untitled")
                 url = src.get("url", "")
+                
                 if url:
+                    # ✅ K8s clickable fix: target="_blank" + rel="noopener noreferrer"
                     st.markdown(f"""
                     <div class="link-item">
-                        <strong style="color: #3b82f6;">{i}.</strong> 
-                        <a href="{url}" target="_blank" style="color: #1e293b; text-decoration: none;">{title}</a>
+                        <a href="{url}" target="_blank" rel="noopener noreferrer">
+                            <span class="link-number">{i}.</span>{title}
+                        </a>
                     </div>
                     """, unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
                     <div class="link-item">
-                        <strong style="color: #94a3b8;">{i}.</strong> 
+                        <span class="link-number" style="color: #94a3b8;">{i}.</span>
                         <span style="color: #64748b;">{title}</span>
                     </div>
                     """, unsafe_allow_html=True)
