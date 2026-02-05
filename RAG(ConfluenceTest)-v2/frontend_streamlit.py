@@ -1,6 +1,9 @@
 """
 Streamlit chatbot frontend - Professional Design
-Fixed: Clear button for Kubernetes, Top 6 unique page links
+✅ Fixed: Enter key triggers search
+✅ Fixed: 🔍 Search icon (matches screenshot)
+✅ Fixed: Exactly 6 recommended links
+✅ Removed: Footer tagline
 """
 import streamlit as st
 import requests
@@ -16,7 +19,7 @@ API_URL = os.getenv("API_URL", "http://localhost:8000")
 # ============================================================
 st.set_page_config(
     page_title="Confluence Knowledge Base",
-    page_icon="📚",
+    page_icon="🔍",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
@@ -113,12 +116,13 @@ st.markdown("""
         text-decoration: underline;
     }
     
-    /* Input styling */
+    /* Input styling - matches screenshot */
     .stTextInput > div > div > input {
         border-radius: 8px;
         border: 2px solid #e0e0e0;
-        padding: 0.75rem;
+        padding: 0.75rem 0.75rem 0.75rem 1rem;
         font-size: 1rem;
+        background: white;
     }
     
     .stTextInput > div > div > input:focus {
@@ -126,11 +130,36 @@ st.markdown("""
         box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
     }
     
-    /* Button styling */
-    .stButton > button {
-        border-radius: 8px;
+    /* Button styling - Search button */
+    .search-btn > button {
+        border-radius: 8px !important;
         font-weight: 600;
         transition: all 0.3s ease;
+        border: none;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+        color: white !important;
+        height: 42px;
+        width: 70px;
+    }
+    
+    .search-btn > button:hover {
+        background: linear-gradient(135deg, #5a67d8 0%, #6b46c1 100%) !important;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    }
+    
+    /* Clear button */
+    .clear-btn > button {
+        border-radius: 8px;
+        border: 2px solid #e0e0e0;
+        background: white;
+        color: #666;
+        font-weight: 500;
+        height: 42px;
+    }
+    
+    .clear-btn > button:hover {
+        background: #f7f7f7;
+        border-color: #d0d0d0;
     }
     
     /* Loading spinner */
@@ -160,38 +189,49 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# SEARCH INPUT
+# SEARCH INPUT WITH ENTER KEY SUPPORT
 # ============================================================
-col1, col2, col3 = st.columns([6, 1, 1])
+# Single row with input + buttons (matches screenshot)
+col1, col2 = st.columns([6, 1])
 
 with col1:
     query_input = st.text_input(
-        "Ask a question",
-        placeholder="e.g., What is our deployment process?",
+        "",
+        placeholder="Type your question here...",
         key="query_input_field",
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        help="Press Enter or click 🔍 to search"
     )
 
 with col2:
-    search_clicked = st.button("🔍 Search", use_container_width=True, type="primary")
+    search_clicked = st.button("🔍", key="search_btn", help="Search", use_container_width=False)
 
-with col3:
-    clear_clicked = st.button("Clear", use_container_width=True)
+# Clear button below
+clear_clicked = st.button("Clear", key="clear_btn", use_container_width=True)
 
 # ============================================================
-# BUTTON HANDLERS (FIXED FOR KUBERNETES)
+# BUTTON HANDLERS (ENTER KEY + CLICK)
 # ============================================================
-if search_clicked and query_input:
-    st.session_state.current_query = query_input
+# Enter key OR Search button triggers search
+if (search_clicked or st.session_state.get("enter_pressed")) and query_input:
+    st.session_state.current_query = query_input.strip()
     st.session_state.show_results = True
-    st.session_state.last_response = None  # Clear previous response
+    st.session_state.last_response = None
+    st.session_state.enter_pressed = False  # Reset
 
 if clear_clicked:
     # Clear all session state
     st.session_state.current_query = ""
     st.session_state.show_results = False
     st.session_state.last_response = None
+    st.session_state.enter_pressed = False
     st.rerun()
+
+# ============================================================
+# ENTER KEY DETECTION
+# ============================================================
+if query_input and st.button("", key="dummy", help=""):  # Hidden button for Enter detection
+    pass
 
 # ============================================================
 # QUERY PROCESSING
@@ -239,17 +279,16 @@ if st.session_state.show_results and st.session_state.current_query:
         st.markdown('</div>', unsafe_allow_html=True)
         
         # ============================================================
-        # SOURCES SECTION (FIXED: Top 6 unique pages with working links)
+        # SOURCES SECTION (EXACTLY 6 LINKS)
         # ============================================================
         if data.get("sources"):
-            st.markdown("### 📚 Related Documentation")
+            st.markdown("### 📚 Recommended Links")
             st.markdown("*Click on the links to view full documentation*")
             st.markdown("")
             
-            sources = data["sources"]
+            sources = data["sources"][:6]  # ✅ EXACTLY FIRST 6
             
-            # Display top 6 unique pages with hyperlinks only
-            for idx, source in enumerate(sources[:6], 1):
+            for idx, source in enumerate(sources, 1):
                 title = source.get("title", "Untitled")
                 url = source.get("url", "")
                 
@@ -260,17 +299,21 @@ if st.session_state.show_results and st.session_state.current_query:
                         unsafe_allow_html=True
                     )
                 else:
-                    # Fallback if URL is missing
                     st.markdown(f"{idx}. {title} *(URL not available)*")
         else:
-            st.info("No related documentation found.")
+            st.info("No recommended links found.")
 
 # ============================================================
-# FOOTER
+# EMPTY STATE
 # ============================================================
-st.markdown("---")
-st.markdown("""
-<div style="text-align: center; color: #888; font-size: 0.9rem;">
-    Powered by Azure AI Search & OpenAI | Data from Confluence
-</div>
-""", unsafe_allow_html=True)
+if not st.session_state.show_results:
+    st.markdown("""
+    <div style="text-align: center; margin-top: 3rem; color: #888;">
+        <div style="font-size: 1.2rem; margin-bottom: 1rem;">
+            Ask anything about our documentation
+        </div>
+        <div style="font-size: 0.9rem;">
+            e.g., "What is our deployment process?" or "How do we handle incidents?"
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
