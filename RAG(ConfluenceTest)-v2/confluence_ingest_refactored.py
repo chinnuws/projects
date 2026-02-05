@@ -182,7 +182,7 @@ def ensure_index():
         SearchField(name="id", type=SearchFieldDataType.String, key=True),
         SearchField(name="page_id", type=SearchFieldDataType.String, filterable=True),
         SearchField(name="title", type=SearchFieldDataType.String, searchable=True),
-        SearchField(name="url", type=SearchFieldDataType.String),  # ADDED: URL field
+        SearchField(name="url", type=SearchFieldDataType.String),
         SearchField(name="content", type=SearchFieldDataType.String, searchable=True),
         SearchField(
             name="content_vector",
@@ -230,10 +230,16 @@ def run():
         title = page["title"]
         content = page["body"]["storage"]["value"]
         
-        # ADDED: Construct Confluence page URL
-        page_url = f"{CONFLUENCE_BASE_URL}/wiki/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
+        # ✅ FIXED: Correct URL construction (no duplicate /wiki)
+        base = CONFLUENCE_BASE_URL.rstrip("/")
+        if base.endswith("/wiki"):
+            # Already has /wiki, don't add it again
+            page_url = f"{base}/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
+        else:
+            # Doesn't have /wiki, add it
+            page_url = f"{base}/wiki/spaces/{CONFLUENCE_SPACE_KEY}/pages/{page_id}"
         
-        print(f"🔹 Processing page {page_id} | v{version}")
+        print(f"🔹 Processing page {page_id} | v{version} | URL: {page_url}")
         
         if state.get(page_id) == version:
             print(" ↳ Skipped (unchanged)")
@@ -248,7 +254,7 @@ def run():
                 "id": doc_id,
                 "page_id": page_id,
                 "title": title,
-                "url": page_url,  # ADDED: Include URL in document
+                "url": page_url,
                 "content": chunk,
                 "content_vector": vector,
             })
