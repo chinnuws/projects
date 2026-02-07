@@ -1,6 +1,5 @@
-
-1) Create Azure Redis Cache
 ```
+1) Create Azure Redis Cache
 # Create Azure Redis Cache
 az redis create \
   --resource-group <your-rg-name> \
@@ -21,8 +20,9 @@ az redis list-keys \
   --name <redis-cache-name>
 ```
 
-2) Project Structure
 ```
+2) Project Structure
+
 jenkins-chatbot/
 ├── backend/
 │   ├── app/
@@ -47,8 +47,8 @@ jenkins-chatbot/
 └── jobs-config.yaml
 ```
 
-3) Backend Code (FastAPI)
 ```
+3) Backend Code (FastAPI)
 ### backend/requirements.txt
 fastapi==0.109.0
 uvicorn==0.27.0
