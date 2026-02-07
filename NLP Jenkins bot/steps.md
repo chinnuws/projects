@@ -22,6 +22,7 @@ az redis list-keys \
 ```
 
 2) Project Structure
+```
 jenkins-chatbot/
 ├── backend/
 │   ├── app/
@@ -44,8 +45,10 @@ jenkins-chatbot/
 │   ├── frontend-deployment.yaml
 │   └── service.yaml
 └── jobs-config.yaml
+```
 
 3) Backend Code (FastAPI)
+```
 ### backend/requirements.txt
 fastapi==0.109.0
 uvicorn==0.27.0
@@ -57,9 +60,10 @@ pydantic-settings==2.1.0
 python-multipart==0.0.9
 PyYAML==6.0.1
 requests==2.31.0
-
-### backend/app/models.py
 ```
+
+```
+### backend/app/models.py
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 
@@ -86,8 +90,8 @@ class JobTriggerResponse(BaseModel):
     job_url: Optional[str] = None
 ```
 
-### backend/app/redis_session.py
 ```
+### backend/app/redis_session.py
 import redis
 import json
 import os
@@ -141,8 +145,8 @@ class RedisSessionManager:
             self.client.expire(key, self.session_ttl)
 ```
 
-### backend/app/jenkins_client.py
 ```
+### backend/app/jenkins_client.py
 import jenkins
 import os
 from typing import Dict, Optional
@@ -205,8 +209,8 @@ class JenkinsJobClient:
             }
 ```
 
-### backend/app/intent_parser.py
 ```
+### backend/app/intent_parser.py
 import os
 import yaml
 from openai import AzureOpenAI
@@ -290,8 +294,8 @@ Respond ONLY with a JSON object in this format:
         return []
 ```
 
-### backend/app/main.py
 ```
+### backend/app/main.py
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
@@ -469,8 +473,8 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 ```
 
-### backend/Dockerfile
 ```
+### backend/Dockerfile
 FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
@@ -481,16 +485,15 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 4) Frontend Code (Streamlit)
-
-### frontend/requirements.txt
 ```
+### frontend/requirements.txt
 streamlit==1.31.0
 requests==2.31.0
 uuid==1.30
 ```
 
-# frontend/app.py
 ```
+# frontend/app.py
 import streamlit as st
 import requests
 import uuid
@@ -585,8 +588,8 @@ if prompt := st.chat_input("What would you like me to do?"):
                 })
 ```
 
-### frontend/Dockerfile
 ```
+### frontend/Dockerfile
 FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
@@ -597,9 +600,8 @@ CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0
 ```
 
 5) Jobs Configuration File
-
-### jobs-config.yaml
 ```
+### jobs-config.yaml
 jobs:
   - job_name: "create-aks-cluster"
     description: "Create a new AKS cluster"
@@ -637,9 +639,8 @@ jobs:
 ```
 
 6) Kubernetes Manifests
-
-### k8s/configmap.yaml
 ```
+### k8s/configmap.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -675,7 +676,9 @@ data:
           - "Role Name"
           - "Service Account"
         documentation_link: "https://confluence.company.com/rolebinding-creation"
+```
 
+```
 ### k8s/secrets.yaml
 apiVersion: v1
 kind: Secret
@@ -693,8 +696,8 @@ stringData:
   JENKINS_API_TOKEN: "your-jenkins-api-token"
 ```
 
-### k8s/backend-deployment.yaml
 ```
+### k8s/backend-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -811,8 +814,8 @@ spec:
   type: ClusterIP
 ```
 
-### k8s/frontend-deployment.yaml
 ```
+### k8s/frontend-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -914,8 +917,8 @@ f. Get Frontend URL
 ```
 
 
+```
 ### ---------------------------------
-
 Azure Redis Cache Integration Explained
 Azure Redis Cache serves as a distributed session store, enabling:
     a. Session Persistence: Chat context survives pod restarts
@@ -926,6 +929,7 @@ The Redis client connects using SSL on port 6380, stores session data as JSON st
 and provides methods to get/set/delete session data.
 
 ### ---------------------------------
+
 Jenkins Integration Explained
 The Python jenkins library:
     a. Authenticates using username + API token
@@ -937,7 +941,6 @@ The Python jenkins library:
 ### ---------------------------------
 Testing Locally
 Create .env file:
-```
     AZURE_OPENAI_API_KEY=your-key
     AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
     AZURE_OPENAI_API_VERSION=2024-02-01
@@ -948,10 +951,9 @@ Create .env file:
     JENKINS_URL=http://localhost:8080
     JENKINS_USERNAME=admin
     JENKINS_API_TOKEN=your-token
-```
+
 
 Run locally:
-```
 # Terminal 1 - Backend
 cd backend
 pip install -r requirements.txt
@@ -963,14 +965,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-For local testing, use a local Redis instance or Docker:
+``` For local testing, use a local Redis instance or Docker: ```
 ```
 docker run -d -p 6379:6379 redis:latest
 ```
 
+```
 Monitoring with Prometheus
 Since your AKS has managed Prometheus, add these annotations to deployments:
-```
 metadata:
   annotations:
     prometheus.io/scrape: "true"
@@ -978,6 +980,7 @@ metadata:
     prometheus.io/path: "/metrics"
 ```
 
+```
 This complete solution provides a production-ready chatbot system with natural language understanding, session management, 
 and Jenkins automation.
-
+```
