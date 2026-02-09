@@ -1,18 +1,21 @@
 from fastapi import FastAPI
-from models import UserQuery, JobResponse
+from models import UserQuery
 from nlp import extract_intent
 from job_router import find_job
-from jenkins import trigger_jenkins
+from jenkins import trigger_jenkins, get_build_number, get_build_status
 
 app = FastAPI(title="ChatOps Backend")
 
-@app.post("/process", response_model=JobResponse)
+build_tracker = {}  # simple in-memory store
+
+
+@app.post("/process")
 def process_query(payload: UserQuery):
     intent_data = extract_intent(payload.query)
     job_name, job = find_job(intent_data["intent"], intent_data["resource"])
 
     if not job:
-        return {"status": "error"}
+        return {"type": "bot", "message": "❌ No matching job found."}
 
     missing = [
         p for p in job["parameters"]
@@ -21,14 +24,30 @@ def process_query(payload: UserQuery):
 
     if missing:
         return {
-            "status": "need_params",
-            "missing": missing
+            "type": "params",
+            "missing": missing,
+            "job_name": job_name
         }
 
-    success = trigger_jenkins(job["url"], payload.params)
+    queue_url = trigger_jenkins(job["url"], payload.params)
+    if not queue_url:
+        return {"type": "bot", "message": "❌ Failed to trigger Jenkins job."}
+
+    build_number = get_build_number(queue_url)
+    build_tracker[job_name] = build_number
 
     return {
-        "status": "triggered",
-        "success": success,
-        "documentation": job["documentation"]
+        "type": "build_started",
+        "job_name": job_name,
+        "build_number": build_number
     }
+
+
+@app.get("/status/{job_name}")
+def poll_status(job_name: str):
+    build_number = build_tracker.get(job_name)
+    if not build_number:
+        return {"status": "UNKNOWN"}
+
+    status = get_build_status(job_name, build_number)
+    return {"status": status}
