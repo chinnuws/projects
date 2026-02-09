@@ -1,35 +1,31 @@
-# backend/main.py
 from fastapi import FastAPI
+from models import UserQuery, JobResponse
 from nlp import extract_intent
 from job_router import find_job
 from jenkins import trigger_jenkins
 
-app = FastAPI()
+app = FastAPI(title="ChatOps Backend")
 
-@app.post("/process")
-def process_query(payload: dict):
-    user_input = payload["query"]
-    params = payload.get("params", {})
-
-    intent_data = extract_intent(user_input)
+@app.post("/process", response_model=JobResponse)
+def process_query(payload: UserQuery):
+    intent_data = extract_intent(payload.query)
     job_name, job = find_job(intent_data["intent"], intent_data["resource"])
 
     if not job:
-        return {"error": "No matching job found"}
+        return {"status": "error"}
 
     missing = [
         p for p in job["parameters"]
-        if p["name"] not in params
+        if p["name"] not in payload.params
     ]
 
     if missing:
         return {
             "status": "need_params",
-            "missing": missing,
-            "job": job_name
+            "missing": missing
         }
 
-    success = trigger_jenkins(job["url"], params)
+    success = trigger_jenkins(job["url"], payload.params)
 
     return {
         "status": "triggered",
