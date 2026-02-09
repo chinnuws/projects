@@ -1,0 +1,12 @@
+jobs:
+  create_namespace:
+    intent: create
+    resource: namespace
+    job_path: JobsFolder/Create-Namespace
+    url: /job/JobsFolder/job/Create-Namespace/buildWithParameters
+    documentation: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+    parameters:
+      - name: cluster_name
+        prompt: Enter Cluster Name
+      - name: namespace
+        prompt: Enter Namespace Name
