@@ -2,6 +2,10 @@ import os
 import jenkins
 import time
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
