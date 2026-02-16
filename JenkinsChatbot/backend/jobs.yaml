@@ -1,0 +1,77 @@
+jobs:
+  - name: "Create Namespace"
+    description: "Creates a new Kubernetes namespace in the specified cluster."
+    trigger_token: "create-namespace-token"
+    job_path: "Cluster-Ops/Create-Namespace"
+    documentation_url: "https://jenkins.internal/job/Cluster-Ops/job/Create-Namespace/doc"
+    parameters:
+      - name: "CLUSTER_NAME"
+        description: "The name of the Kubernetes cluster."
+        required: true
+        type: "string"
+      - name: "NAMESPACE_NAME"
+        description: "The name of the new namespace."
+        required: true
+        type: "string"
+      - name: "RESOURCE_QUOTA"
+        description: "Resource quota (small, medium, large)."
+        required: false
+        default: "medium"
+        type: "string"
+
+  - name: "Create Rolebinding"
+    description: "Binds a role to a user or group in a specific namespace."
+    trigger_token: "create-rolebinding-token"
+    job_path: "Cluster-Ops/Create-Rolebinding"
+    documentation_url: "https://jenkins.internal/job/Cluster-Ops/job/Create-Rolebinding/doc"
+    parameters:
+      - name: "CLUSTER_NAME"
+        description: "The targeted Kubernetes cluster."
+        required: true
+        type: "string"
+      - name: "NAMESPACE"
+        description: "The namespace where the rolebinding applies."
+        required: true
+        type: "string"
+      - name: "USER_EMAIL"
+        description: "Email of the user to bind."
+        required: true
+        type: "string"
+      - name: "ROLE_NAME"
+        description: "The role to assign (admin, edit, view)."
+        required: true
+        type: "string"
+
+  - name: "Deploy Service"
+    description: "Deploys a microservice to the cluster."
+    trigger_token: "deploy-service-token"
+    job_path: "Deployments/Microservice-Deploy"
+    documentation_url: "https://jenkins.internal/job/Deployments/job/Microservice-Deploy/doc"
+    parameters:
+      - name: "SERVICE_NAME"
+        description: "Name of the service to deploy."
+        required: true
+        type: "string"
+      - name: "IMAGE_TAG"
+        description: "Docker image tag."
+        required: true
+        type: "string"
+      - name: "ENVIRONMENT"
+        description: "Target environment (dev, qa, prod)."
+        required: true
+        type: "string"
+
+  - name: "Delete Namespace"
+    description: "Deletes a Kubernetes namespace and all its resources."
+    trigger_token: "delete-namespace-token"
+    job_path: "Cluster-Ops/Delete-Namespace"
+    documentation_url: "https://jenkins.internal/job/Cluster-Ops/job/Delete-Namespace/doc"
+    parameters:
+      - name: "CLUSTER_NAME"
+        description: "The targeted Kubernetes cluster."
+        required: true
+        type: "string"
+      - name: "NAMESPACE_NAME"
+        description: "The namespace to delete."
+        required: true
+        type: "string"
