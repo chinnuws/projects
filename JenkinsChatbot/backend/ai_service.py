@@ -2,6 +2,10 @@ import os
 import json
 import logging
 from typing import Dict, Any, List, Optional
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 from azure.ai.inference import ChatCompletionsClient
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
