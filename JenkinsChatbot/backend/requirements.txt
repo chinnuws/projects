@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-jenkins
+pyyaml
+azure-ai-inference
+azure-identity
+azure-core
+pydantic
+python-multipart
+python-dotenv
+requests
