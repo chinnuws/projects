@@ -47,9 +47,10 @@ Task:
 1. Analyze the user's input.
 2. Determine the Intent: 'TRIGGER' (to start a job) or 'STATUS' (to check job status).
 3. Identify the Job Name based on the available jobs list. 
-4. If the input is ambiguous and could match multiple jobs (e.g., user says 'namespace' and both 'Create Namespace' and 'Delete Namespace' exist), list all potential job names in the 'potential_jobs' array and set 'job_name' to null.
-5. Extract any parameters provided in the input. Map them to the job's parameter names (e.g. 'dev' -> 'ENVIRONMENT').
-6. Note: If the user asks about a job not in the list, set Job Name to null.
+4. If the input is ambiguous and could match multiple jobs, list all potential job names in the 'potential_jobs' array and set 'job_name' to null.
+5. Extract any parameters provided in the input. Map them to the job's parameter names.
+6. For 'STATUS' intent, look for build numbers (e.g., 'build 105', '#105', '105') and extract as 'BUILD_NUMBER'.
+7. Note: If the user asks about a job not in the list, set Job Name to null.
 
 Output JSON format ONLY:
 {{
@@ -146,6 +147,10 @@ Output JSON format ONLY:
             if word.lower() in ["namespace", "named"]:
                  if i + 1 < len(words):
                     params["NAMESPACE_NAME"] = words[i+1]
+            if word.lower() == "build" or word.startswith("#"):
+                val = words[i+1] if word.lower() == "build" and i+1 < len(words) else word.replace("#", "")
+                if val.isdigit():
+                    params["BUILD_NUMBER"] = val
         
         return {
             "intent": intent,
