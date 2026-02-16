@@ -22,12 +22,15 @@ class JenkinsService:
 
     def get_job_status(self, job_name: str, build_number: int = None):
         if self.mock_mode:
+            # If build_number is 102 (our mock trigger build), check how long since "start"
+            # Since we are stateless, we will just simulate a success after a few seconds
+            # if the build_number matches our triggered one.
             return {
                 "status": "SUCCESS",
                 "full_name": job_name,
                 "number": build_number or 101,
                 "timestamp": int(time.time() * 1000),
-                "result": "SUCCESS",
+                "result": "SUCCESS" if build_number != 102 or int(time.time()) % 15 > 10 else None,
                 "duration": 5000,
                 "url": f"{self.url}/job/{job_name}/{build_number or 101}/"
             }
@@ -47,15 +50,22 @@ class JenkinsService:
             logger.error(f"Error fetching job status: {e}")
             return {"error": str(e)}
 
+    def get_build_from_queue(self, queue_item_id: int):
+        if self.mock_mode:
+            # item_id is a timestamp. If > 2 seconds have passed, it's "started"
+            elapsed = int(time.time()) - queue_item_id
+            if elapsed > 2:
+                return {"build_number": 102, "status": "STARTED"}
+            return {"status": "QUEUED"}
+
     def trigger_job(self, job_name: str, parameters: dict):
         if self.mock_mode:
-            # Simulate a successful trigger
             logger.info(f"Mock triggering job {job_name} with params {parameters}")
             return {
                 "triggered": True,
-                "queue_item": 12345,
+                "queue_item": int(time.time()), # Using timestamp as mock queue ID
                 "message": f"Job '{job_name}' triggered successfully (Mock).",
-                "job_url": f"{self.url}/job/{job_name}/102/"
+                "job_url": f"{self.url}/job/{job_name}/"
             }
 
         try:
