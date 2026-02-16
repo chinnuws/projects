@@ -1,8 +1,14 @@
+import os
+import logging
+from dotenv import load_dotenv
+
+# Load environment variables at the very beginning
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
-import logging
 
 from config_loader import load_jobs_config, get_job_by_name
 from ai_service import AIService
